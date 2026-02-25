@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IslamicPassport — Identidade Descentralizada</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+</head>
+<body>
+
+  <!-- ═══════════ Header ═══════════ -->
+  <header>
+    <h1><img src="icon.svg" alt="Islamic Passport" style="height:36px;vertical-align:middle;margin-right:8px;"/>Islamic<span>Passport</span></h1>
+    <div id="walletSection">
+      <div class="wallet-info hidden" id="walletInfo">
+        <div id="walletAddress"></div>
+        <div>Chain <span class="chain-badge" id="walletChain">--</span></div>
+      </div>
+      <button id="btnConnect">Conectar MetaMask</button>
+    </div>
+  </header>
+
+  <!-- ═══════════ Config bar ═══════════ -->
+  <div class="config-bar">
+    <label>Contrato:</label>
+    <input type="text" id="inputContractAddr" placeholder="0x... (endereço do contrato implantado)" />
+    <button id="btnSetContract">Definir</button>
+  </div>
+
+  <!-- ═══════════ Navigation ═══════════ -->
+  <nav class="tabs" id="mainTabs">
+    <button class="active" data-tab="tabRegister">Registro</button>
+    <button data-tab="tabDashboard">Meu Painel</button>
+    <button data-tab="tabSheikhs">Sheiks</button>
+    <button data-tab="tabAttest">Atestar / Promover</button>
+    <button data-tab="tabRequest">Solicitar Atesto</button>
+  </nav>
+
+  <!-- ═══════════ Main content ═══════════ -->
+  <main>
+
+    <!-- ── Mensagem de status fixa ── -->
+    <div id="statusMsg" class="hidden"></div>
+
+    <!-- ══════════════════════════════════════ TAB: Registro ══════════════════════════════════════ -->
+    <section id="tabRegister" class="tab-panel active">
+      <div class="card">
+        <h2>Registro de Perfil</h2>
+        <p class="mb-2" style="font-size:0.85rem;color:var(--text-secondary);">
+          Seus dados pessoais <strong>não</strong> serão enviados à blockchain.
+          Apenas hashes (keccak256) são gravados on-chain. Você poderá exportar seus dados completos como JSON (VC) para guardar localmente.
+        </p>
+
+        <div id="alreadyRegistered" class="alert alert-info hidden">
+          Você já está registrado! Acesse <strong>Meu Painel</strong> para ver seu perfil.
+        </div>
+
+        <form id="formRegister" autocomplete="off">
+          <div class="form-group">
+            <label>Nome Oficial</label>
+            <input type="text" id="regNomeOficial" placeholder="Ex: Muhammad ibn Abdullah" required />
+          </div>
+          <div class="form-group">
+            <label>Nome Muçulmano</label>
+            <input type="text" id="regNomeMuçulmano" placeholder="Ex: Abu Bakr" required />
+          </div>
+          <div class="form-group">
+            <label>Mesquita</label>
+            <input type="text" id="regMesquita" placeholder="Ex: Mesquita Central de Lisboa" required />
+          </div>
+          <div class="form-group">
+            <label>URI off-chain (opcional)</label>
+            <input type="text" id="regUri" placeholder="ipfs://... ou ar://... (deixe vazio se não tiver)" />
+          </div>
+          <button type="submit" class="btn btn-primary">Registrar Perfil</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Dashboard ══════════════════════════════════════ -->
+    <section id="tabDashboard" class="tab-panel">
+      <div class="card">
+        <h2>Meu Painel</h2>
+
+        <div id="dashNotRegistered" class="alert alert-warning hidden">
+          Você ainda não está registrado. Vá até a aba <strong>Registro</strong> primeiro.
+        </div>
+
+        <div id="dashContent" class="hidden">
+          <div class="form-group">
+            <label>Seu DID</label>
+            <div class="did-display" id="dashDID">—</div>
+          </div>
+          <div class="flex-gap mb-2">
+            <div><strong>User ID:</strong> <span id="dashUserId">—</span></div>
+            <div id="dashSheikBadge" class="hidden"><span class="badge badge-sheik">SHEIK</span></div>
+          </div>
+
+          <h3>Credenciais</h3>
+          <div id="dashCredentials">
+            <p style="color:var(--text-secondary);font-size:0.85rem;">Carregando...</p>
+          </div>
+
+          <div class="mt-2">
+            <button class="btn btn-accent btn-sm" id="btnExportVC">Exportar VC JSON (dados locais)</button>
+            <button class="btn btn-sm" id="btnImportVC" style="background:#e0e0e0;color:#424242;">Importar VC JSON</button>
+            <input type="file" id="fileImportVC" accept=".json" class="hidden" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Sheikhs ══════════════════════════════════════ -->
+    <section id="tabSheikhs" class="tab-panel">
+      <div class="card">
+        <h2>Lista de Sheiks</h2>
+        <button class="btn btn-sm btn-primary mb-2" id="btnRefreshSheikhs">Atualizar Lista</button>
+        <table>
+          <thead><tr><th>#</th><th>Endereço</th><th>DID</th></tr></thead>
+          <tbody id="sheikhTableBody">
+            <tr><td colspan="3" style="color:var(--text-secondary);">Clique em "Atualizar Lista"</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Attest / Promote ══════════════════════════════════════ -->
+    <section id="tabAttest" class="tab-panel">
+      <!-- Atesto -->
+      <div class="card">
+        <h2>Atestar Muçulmano (somente Sheik)</h2>
+        <form id="formAttest" autocomplete="off">
+          <div class="form-group">
+            <label>Endereço do muçulmano (subject)</label>
+            <input type="text" id="attestSubject" placeholder="0x..." required />
+          </div>
+          <div class="form-group">
+            <label>URI off-chain (opcional)</label>
+            <input type="text" id="attestUri" placeholder="ipfs://..." />
+          </div>
+          <button type="submit" class="btn btn-primary">Emitir Atesto</button>
+        </form>
+      </div>
+
+      <!-- Promoção -->
+      <div class="card">
+        <h2>Promover a Sheik (somente Sheik)</h2>
+        <form id="formPromote" autocomplete="off">
+          <div class="form-group">
+            <label>Endereço do novo sheik (subject)</label>
+            <input type="text" id="promoteSubject" placeholder="0x..." required />
+          </div>
+          <div class="form-group">
+            <label>URI off-chain (opcional)</label>
+            <input type="text" id="promoteUri" placeholder="ipfs://..." />
+          </div>
+          <button type="submit" class="btn btn-accent">Promover a Sheik</button>
+        </form>
+      </div>
+
+      <!-- Revogar -->
+      <div class="card">
+        <h2>Revogar Credencial</h2>
+        <form id="formRevoke" autocomplete="off">
+          <div class="form-group">
+            <label>ID da Credencial</label>
+            <input type="number" id="revokeCredId" placeholder="1" min="1" required />
+          </div>
+          <button type="submit" class="btn btn-danger btn-sm">Revogar</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Solicitar Atesto ══════════════════════════════════════ -->
+    <section id="tabRequest" class="tab-panel">
+      <div class="card">
+        <h2>Solicitar Atesto a um Sheik</h2>
+        <p class="mb-2" style="font-size:0.85rem;color:var(--text-secondary);">
+          Este pedido é <strong>off-chain</strong>. Gere o JSON abaixo e envie ao sheik por qualquer meio (WhatsApp, e-mail, etc.).
+        </p>
+        <form id="formRequest" autocomplete="off">
+          <div class="form-group">
+            <label>Endereço do Sheik</label>
+            <input type="text" id="reqSheikh" placeholder="0x..." required />
+          </div>
+          <div class="form-group">
+            <label>Mensagem adicional (opcional)</label>
+            <input type="text" id="reqMessage" placeholder="Por favor, ateste minha fé..." />
+          </div>
+          <button type="submit" class="btn btn-primary">Gerar Pedido</button>
+        </form>
+        <div id="requestOutput" class="mt-2 hidden">
+          <label style="font-weight:600;font-size:0.85rem;">JSON do pedido:</label>
+          <textarea id="requestJSON" readonly rows="8"></textarea>
+          <button class="btn btn-sm btn-accent mt-1" id="btnCopyRequest">Copiar</button>
+          <button class="btn btn-sm mt-1" id="btnDownloadRequest" style="background:#e0e0e0;color:#424242;">Download JSON</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════ Scripts ═══════════ -->
+  <!-- ethers.js v6 via CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"
+          integrity="sha512-OEFxS5EkfgbB1BRWDNCOHS7JQKaKFApXm89E3ZxZE+fDcGfkUEMSp/K4pYqbcMDRD2IF4kNLA8QFrNR5JqTnQ=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="app.js"></script>
+
+</body>
+</html>
