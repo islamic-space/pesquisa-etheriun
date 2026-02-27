@@ -385,7 +385,7 @@ async function connectWallet() {
 
     // Se já tem contrato selecionado, reconecta
     if (contractAddress) {
-      attachContract(contractAddress);
+      await attachContract(contractAddress);
     }
 
     // Tenta restaurar contratos salvos
@@ -394,7 +394,7 @@ async function connectWallet() {
     // Fallback: se contract ainda é null, tenta o valor atual do combobox
     if (!contract) {
       const selVal = document.getElementById("selectContract").value;
-      if (selVal) attachContract(selVal);
+      if (selVal) await attachContract(selVal);
     }
 
   } catch (err) {
@@ -467,8 +467,10 @@ function loadContractList() {
   // Auto-seleciona o mais recente (primeiro da lista)
   if (contractList.length > 0 && !contractAddress) {
     const newest = contractList[0];
-    attachContract(newest);
-    document.getElementById("selectContract").value = newest;
+    // attachContract é async; aqui é fire-and-forget (loadContractList é sync)
+    attachContract(newest).then(() => {
+      document.getElementById("selectContract").value = newest;
+    });
   }
 }
 
@@ -544,7 +546,7 @@ function removeSelectedContract() {
  * Adiciona um endereço de contrato à lista e seleciona-o.
  * @param {string} addr
  */
-function addContractAddress(addr) {
+async function addContractAddress(addr) {
   if (!ethers.isAddress(addr)) {
     showStatus("Endereço de contrato inválido.", "error");
     return;
@@ -556,7 +558,7 @@ function addContractAddress(addr) {
     saveContractList();
   }
   renderContractSelect();
-  attachContract(addr);
+  await attachContract(addr);
   document.getElementById("selectContract").value = addr;
   document.getElementById("inputContractAddr").value = "";
 }
@@ -733,14 +735,24 @@ async function attachContract(addr) {
       console.warn("[attachContract] eth_getCode falhou (prosseguindo):", codeErr.message);
     }
 
+    if (!hasCode) {
+      showStatus(`Endereço ${shortAddr(addr)} não possui bytecode. Verifique se o contrato foi implantado nesse endereço/rede.`, "warning", 8000);
+    }
+
     contractAddress = addr;
     contract = Web3Client.getContractWithSigner(CONTRACT_ABI, addr);
     localStorage.setItem("ip_contractAddress", addr);
 
+    // Validação ABI em background (soft check — não bloqueia)
     if (hasCode) {
-      showStatus(`Contrato configurado: ${shortAddr(addr)} (bytecode verificado ✓)`, "success");
+      const valid = await _isIslamicPassportContract(addr);
+      if (valid) {
+        showStatus(`Contrato configurado: ${shortAddr(addr)} (ABI verificada ✓)`, "success");
+      } else {
+        showStatus(`Contrato configurado: ${shortAddr(addr)} — ⚠️ a ABI pode não corresponder ao contrato implantado.`, "warning", 8000);
+      }
     } else {
-      showStatus(`Contrato configurado: ${shortAddr(addr)} — bytecode não confirmado, verifique se o endereço está correto.`, "warning", 8000);
+      showStatus(`Contrato configurado: ${shortAddr(addr)} — bytecode não confirmado.`, "warning", 8000);
     }
   } catch (err) {
     console.error("[attachContract] Erro:", err);
@@ -956,11 +968,20 @@ async function handleRegister(e) {
       registeredAt: new Date().toISOString()
     });
 
-    showStatus("Perfil registrado com sucesso! Carregando painel…", "success");
+    showStatus("Perfil registrado com sucesso! Aguardando sincronização…", "success");
     document.getElementById("formRegister").reset();
 
     // Aguarda provider sincronizar com o bloco confirmado antes de ler o contrato
-    await new Promise(r => setTimeout(r, 1500));
+    for (let i = 0; i < 8; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const p = await contract.getProfile(currentAccount);
+        if (p && p[5]) {          // p[5] = bool exists
+          console.log("[handleRegister] Perfil disponível após", (i + 1) * 2, "s");
+          break;
+        }
+      } catch (_) { /* provider ainda não sincronizou, tenta de novo */ }
+    }
     switchTab("tabDashboard");
   }
 }
@@ -981,7 +1002,7 @@ async function refreshDashboard(_retries = 0) {
   const regAlert = document.getElementById("alreadyRegistered");
 
   try {
-    console.error("[refreshDashboard] Chamando getProfile em:", contract.target || contractAddress, "para conta:", currentAccount);
+    console.log("[refreshDashboard] Chamando getProfile em:", contract.target || contractAddress, "para conta:", currentAccount);
     const profile = await contract.getProfile(currentAccount);
     const exists = profile[5]; // bool exists
 
@@ -1042,15 +1063,16 @@ async function refreshDashboard(_retries = 0) {
     }
 
   } catch (err) {
+    const isBadData = err.code === "BAD_DATA" || (err.message && err.message.includes('could not decode'));
     console.error("[refreshDashboard] Erro (tentativa " + (_retries + 1) + "):", err);
-    // BAD_DATA = contrato não existe, ABI incompatível, ou provider ainda não sincronizou
-    if ((err.code === "BAD_DATA" || (err.message && err.message.includes('could not decode'))) && _retries < 2) {
-      console.log("[refreshDashboard] Tentando novamente em 2s…");
-      showStatus("Aguardando sincronização do contrato…", "info", 3000);
-      await new Promise(r => setTimeout(r, 2000));
+
+    if (isBadData && _retries < 4) {
+      console.log("[refreshDashboard] Tentando novamente em 3s…");
+      showStatus("Aguardando sincronização do contrato…", "info", 4000);
+      await new Promise(r => setTimeout(r, 3000));
       return refreshDashboard(_retries + 1);
     }
-    if (err.code === "BAD_DATA" || (err.message && err.message.includes('could not decode'))) {
+    if (isBadData) {
       dashContent.classList.add("hidden");
       dashNot.classList.add("hidden");
       showStatus("⚠️ Não foi possível ler o contrato. Verifique se o endereço está correto e se o contrato IslamicPassport foi implantado nesse endereço.", "error", 10000);
