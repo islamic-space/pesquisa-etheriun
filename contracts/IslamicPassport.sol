@@ -290,7 +290,6 @@ contract IslamicPassport is AccessControl {
         )
     {
         Profile storage p = _profiles[user];
-        require(p.exists, "IslamicPassport: perfil nao encontrado");
         return (p.userId, p.hNomeOficial, p.hNomeMuculmano, p.hMesquita, p.uri, p.exists);
     }
 

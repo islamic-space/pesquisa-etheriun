@@ -565,19 +565,18 @@ async function addContractAddress(addr) {
 
 /**
  * Verifica se o contrato no endereço dado é um IslamicPassport.
- * Tenta chamar deployChainId() e getProfile(address(0)) — se ambos
+ * Tenta chamar deployChainId() e totalUsers() — se ambos
  * responderem sem erro, é muito provável que seja o nosso contrato.
  * @param {string} addr
  * @returns {Promise<boolean>}
  */
 async function _isIslamicPassportContract(addr) {
   try {
-    const provider = Web3Client.getProviderFromMetaMask();
-    const tempContract = new ethers.Contract(addr, CONTRACT_ABI, provider);
+    const tempContract = Web3Client.getReadContract(CONTRACT_ABI, addr);
     // deployChainId é uma variável pública única do IslamicPassport
     await tempContract.deployChainId();
-    // getProfile retorna uma tupla — se decodificar sem BAD_DATA, é compatível
-    await tempContract.getProfile(ethers.ZeroAddress);
+    // totalUsers retorna uint256 sem revert — verifica compatibilidade da ABI
+    await tempContract.totalUsers();
     return true;
   } catch (e) {
     console.log(`[_isIslamicPassportContract] ${addr} falhou:`, e.code || e.message);
@@ -654,17 +653,16 @@ async function scanBlockchainForContracts() {
 
               if (receipt && receipt.contractAddress) {
                 const addr = ethers.getAddress(receipt.contractAddress);
-                // Verifica duplicata (checksum-safe)
-                const isDup = contractList.some(a => {
-                  try { return ethers.getAddress(a) === addr; } catch (_) { return false; }
-                }) || foundAddrs.includes(addr);
-
-                if (!isDup) {
+                // Pula apenas se já encontrado NESTE scan
+                if (!foundAddrs.includes(addr)) {
                   progressEl.textContent = `Verificando contrato ${shortAddr(addr)}…`;
                   const isIP = await _isIslamicPassportContract(addr);
                   if (isIP) {
                     foundAddrs.push(addr);
-                    console.log(`[scan] ✅ IslamicPassport bloco ${i}: ${addr}`);
+                    const alreadyInList = contractList.some(a => {
+                      try { return ethers.getAddress(a) === addr; } catch (_) { return false; }
+                    });
+                    console.log(`[scan] ✅ IslamicPassport bloco ${i}: ${addr}${alreadyInList ? " (já na lista)" : " (novo)"}`);
                     progressEl.textContent = `✅ IslamicPassport: ${shortAddr(addr)} (${foundAddrs.length}/${maxContracts})`;
                   } else {
                     console.log(`[scan] ❌ Bloco ${i}: ${addr} não é IslamicPassport`);
@@ -679,24 +677,33 @@ async function scanBlockchainForContracts() {
       }
     }
 
-    // Insere encontrados na lista (newest-first)
-    if (foundAddrs.length > 0) {
-      for (let i = foundAddrs.length - 1; i >= 0; i--) {
-        contractList.unshift(foundAddrs[i]);
+    // Filtra apenas os novos (que ainda não estão na lista)
+    const newAddrs = foundAddrs.filter(addr => !contractList.some(a => {
+      try { return ethers.getAddress(a) === addr; } catch (_) { return false; }
+    }));
+
+    // Insere novos na lista (newest-first)
+    if (newAddrs.length > 0) {
+      for (let i = newAddrs.length - 1; i >= 0; i--) {
+        contractList.unshift(newAddrs[i]);
       }
       saveContractList();
+    }
+
+    if (foundAddrs.length > 0) {
       renderContractSelect();
       const newest = contractList[0];
       document.getElementById("selectContract").value = newest;
       if (currentAccount) await attachContract(newest);
-      showStatus(`✅ ${foundAddrs.length} contrato(s) IslamicPassport encontrado(s) em ${blocksScanned} blocos!`, "success", 8000);
-    } else if (contractList.length > 0) {
-      showStatus(`Nenhum contrato novo em ${blocksScanned} blocos. Os existentes já estão na lista.`, "info", 5000);
+      const detail = newAddrs.length > 0
+        ? ` (${newAddrs.length} novo(s), ${foundAddrs.length - newAddrs.length} já na lista)`
+        : " (todos já estavam na lista)";
+      showStatus(`✅ ${foundAddrs.length} contrato(s) IslamicPassport encontrado(s) em ${blocksScanned} blocos!${detail}`, "success", 8000);
     } else {
-      showStatus("Nenhum contrato encontrado. Faça o deploy do IslamicPassport.sol primeiro (via Remix).", "warning", 8000);
+      showStatus("Nenhum contrato IslamicPassport encontrado. Faça o deploy do IslamicPassport.sol primeiro (via Remix).", "warning", 8000);
     }
 
-    progressEl.textContent = `Concluído: ${blocksScanned} blocos, ${foundAddrs.length} contrato(s).`;
+    progressEl.textContent = `Concluído: ${blocksScanned} blocos, ${foundAddrs.length} contrato(s) encontrado(s)${newAddrs.length > 0 ? `, ${newAddrs.length} novo(s)` : ""}.`;
 
   } catch (err) {
     console.error("[scanBlockchainForContracts] Erro:", err);
@@ -724,35 +731,35 @@ async function attachContract(addr) {
     return;
   }
   try {
-    // Tenta verificar bytecode no endereço (soft check — não bloqueia)
+    // Tenta verificar bytecode no endereço (via RPC direto — evita cache do BrowserProvider)
     let hasCode = false;
     try {
-      const provider = Web3Client.getProviderFromMetaMask();
-      const code = await provider.getCode(addr);
-      console.log(`[attachContract] provider.getCode(${addr}) =>`, code ? code.substring(0, 30) + "..." : code);
-      hasCode = code && code !== "0x" && code !== "0x0" && code.length > 4;
+      const codeHex = await window.ethereum.request({
+        method: "eth_getCode",
+        params: [addr, "latest"]
+      });
+      hasCode = codeHex && codeHex !== "0x" && codeHex !== "0x0" && codeHex.length > 4;
+      console.log(`[attachContract] eth_getCode(${addr}) => length:${codeHex ? codeHex.length : 0}, hasCode:${hasCode}`);
     } catch (codeErr) {
       console.warn("[attachContract] eth_getCode falhou (prosseguindo):", codeErr.message);
     }
 
     if (!hasCode) {
-      showStatus(`Endereço ${shortAddr(addr)} não possui bytecode. Verifique se o contrato foi implantado nesse endereço/rede.`, "warning", 8000);
+      console.warn(`[attachContract] bytecode não detectado para ${addr} (pode ser cache stale do MetaMask)`);
     }
 
     contractAddress = addr;
     contract = Web3Client.getContractWithSigner(CONTRACT_ABI, addr);
     localStorage.setItem("ip_contractAddress", addr);
 
-    // Validação ABI em background (soft check — não bloqueia)
-    if (hasCode) {
-      const valid = await _isIslamicPassportContract(addr);
-      if (valid) {
-        showStatus(`Contrato configurado: ${shortAddr(addr)} (ABI verificada ✓)`, "success");
-      } else {
-        showStatus(`Contrato configurado: ${shortAddr(addr)} — ⚠️ a ABI pode não corresponder ao contrato implantado.`, "warning", 8000);
-      }
+    // Validação ABI em background (sempre tenta, independente do bytecode check)
+    const valid = await _isIslamicPassportContract(addr);
+    if (valid) {
+      showStatus(`Contrato configurado: ${shortAddr(addr)} (ABI verificada ✓)`, "success");
+    } else if (hasCode) {
+      showStatus(`Contrato configurado: ${shortAddr(addr)} — ⚠️ a ABI pode não corresponder ao contrato implantado.`, "warning", 8000);
     } else {
-      showStatus(`Contrato configurado: ${shortAddr(addr)} — bytecode não confirmado.`, "warning", 8000);
+      showStatus(`Contrato configurado: ${shortAddr(addr)} — bytecode não confirmado (pode ser cache do MetaMask).`, "warning", 8000);
     }
   } catch (err) {
     console.error("[attachContract] Erro:", err);
@@ -824,6 +831,61 @@ function hideTxOverlay() {
   document.getElementById("txOverlay").classList.add("hidden");
 }
 
+// ── Data Loading Overlay (aguardar dados do contrato) ──
+
+let _dataLoadingTimer = null;
+
+/**
+ * Mostra overlay bloqueante informando que está aguardando dados do contrato.
+ * @param {number} attempt - Número da tentativa atual (1-based)
+ * @param {string} [providerLabel] - Qual provider está sendo usado
+ */
+function showDataLoadingOverlay(attempt, providerLabel) {
+  const overlay = document.getElementById("dataLoadingOverlay");
+  document.getElementById("dataLoadingAttempt").textContent = attempt;
+  if (providerLabel) {
+    document.getElementById("dataLoadingProvider").textContent = `Provider: ${providerLabel}`;
+  }
+  overlay.classList.remove("hidden");
+
+  // Inicia contador de tempo se ainda não existe
+  if (!_dataLoadingTimer) {
+    const startTime = Date.now();
+    const timeEl = document.getElementById("dataLoadingTime");
+    _dataLoadingTimer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      timeEl.textContent = elapsed;
+    }, 1000);
+  }
+}
+
+/**
+ * Atualiza a mensagem e tentativa do overlay de carregamento.
+ * @param {number} attempt
+ * @param {string} msg
+ * @param {string} [providerLabel]
+ */
+function updateDataLoadingOverlay(attempt, msg, providerLabel) {
+  document.getElementById("dataLoadingAttempt").textContent = attempt;
+  document.getElementById("dataLoadingMsg").textContent = msg;
+  if (providerLabel) {
+    document.getElementById("dataLoadingProvider").textContent = `Provider: ${providerLabel}`;
+  }
+}
+
+/**
+ * Esconde o overlay de carregamento de dados e limpa o timer.
+ */
+function hideDataLoadingOverlay() {
+  document.getElementById("dataLoadingOverlay").classList.add("hidden");
+  if (_dataLoadingTimer) {
+    clearInterval(_dataLoadingTimer);
+    _dataLoadingTimer = null;
+  }
+  document.getElementById("dataLoadingTime").textContent = "0";
+  document.getElementById("dataLoadingProvider").textContent = "";
+}
+
 /**
  * Fluxo completo de transação com confirmação:
  *  1. Estima gas e calcula custo
@@ -839,12 +901,12 @@ function hideTxOverlay() {
  * @returns {Promise<ethers.TransactionReceipt|null>} - Receipt ou null se cancelado
  */
 async function executeWithConfirmation(actionName, methodName, args = []) {
-  if (!contract) {
-    showStatus("Configure o endereço do contrato.", "warning");
-    return null;
-  }
   if (!currentAccount) {
     showStatus("Conecte a carteira primeiro.", "warning");
+    return null;
+  }
+  if (!contractAddress || !contract) {
+    showStatus("Adicione o endereço do contrato implantado antes de executar transações.", "warning");
     return null;
   }
 
@@ -921,8 +983,22 @@ function switchTab(tabId) {
   document.querySelector(`nav.tabs button[data-tab="${tabId}"]`).classList.add("active");
 
   // Ações ao entrar na aba
-  if (tabId === "tabDashboard") refreshDashboard();
-  if (tabId === "tabSheikhs") refreshSheikhs();
+  if (tabId === "tabDashboard") {
+    if (!currentAccount) {
+      showStatus("Conecte a carteira MetaMask antes de acessar o painel.", "warning");
+    } else if (!contractAddress || !contract) {
+      showStatus("Adicione o endereço do contrato implantado antes de acessar o painel.", "warning");
+    }
+    refreshDashboard();
+  }
+  if (tabId === "tabSheikhs") {
+    if (!currentAccount) {
+      showStatus("Conecte a carteira MetaMask antes de consultar os sheiks.", "warning");
+    } else if (!contractAddress || !contract) {
+      showStatus("Adicione o endereço do contrato implantado antes de consultar os sheiks.", "warning");
+    }
+    refreshSheikhs();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -959,6 +1035,60 @@ async function handleRegister(e) {
   );
 
   if (receipt) {
+    // Imprime hash da transação e IDs/endereços do registro inserido
+    console.log(`[handleRegister] TX hash: ${receipt.hash}`);
+    console.log(`[handleRegister] Contrato: ${contractAddress}`);
+    console.log(`[handleRegister] Conta registrada: ${currentAccount}`);
+    console.log(`[handleRegister] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
+
+    let registeredUserId = null;
+
+    if (receipt.logs && receipt.logs.length > 0) {
+      for (let i = 0; i < receipt.logs.length; i++) {
+        const log = receipt.logs[i];
+        console.log(`[handleRegister] Log[${i}] raw:`, { address: log.address, topics: log.topics, data: log.data });
+        try {
+          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
+          if (parsed) {
+            console.log(`[handleRegister] Log[${i}] parsed event: ${parsed.name}`, parsed.args);
+            if (parsed.name === "ProfileRegistered") {
+              registeredUserId = parsed.args[1].toString();
+              console.log(`[handleRegister] ✅ ProfileRegistered → userId: ${registeredUserId}, address: ${parsed.args[0]}`);
+            } else if (parsed.name === "CredentialIssued") {
+              console.log(`[handleRegister] ✅ CredentialIssued → credentialId: ${parsed.args[0].toString()}, type: ${CRED_TYPE_NAMES[Number(parsed.args[1])] || parsed.args[1]}, issuer: ${parsed.args[2]}, subject: ${parsed.args[3]}`);
+            }
+          }
+        } catch (parseErr) {
+          console.warn(`[handleRegister] Log[${i}] parse falhou (pode ser evento de outro contrato):`, parseErr.message);
+        }
+      }
+    } else {
+      console.warn("[handleRegister] Nenhum log encontrado no receipt. Receipt completo:", receipt);
+    }
+
+    // Confirmação via getProfile — busca o userId atribuído on-chain
+    try {
+      const rcCheck = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+      const prof = await rcCheck.getProfile(currentAccount);
+      const onChainId = prof[0].toString();
+      const exists = prof[5];
+      if (exists) {
+        console.log(`[handleRegister] ✅ getProfile confirmou → userId: ${onChainId}, exists: true, address: ${currentAccount}`);
+        if (!registeredUserId) registeredUserId = onChainId;
+      } else {
+        console.warn(`[handleRegister] ⚠️ getProfile retornou exists=false para ${currentAccount} (userId: ${onChainId}). O perfil pode ainda não ter sido minerado.`);
+      }
+    } catch (profErr) {
+      console.warn(`[handleRegister] ⚠️ getProfile falhou após registro:`, profErr.code || profErr.message);
+    }
+
+    // Resumo final do registro
+    if (registeredUserId) {
+      console.log(`[handleRegister] ══ RESUMO: Perfil registrado com userId=${registeredUserId} para ${currentAccount} ══`);
+    } else {
+      console.warn(`[handleRegister] ⚠️ RESUMO: Registro enviado mas userId NÃO foi obtido dos logs nem do getProfile para ${currentAccount}`);
+    }
+
     // Salva dados pessoais localmente
     saveLocalProfile(currentAccount, {
       nomeOficial: nomeOficial.trim(),
@@ -968,20 +1098,10 @@ async function handleRegister(e) {
       registeredAt: new Date().toISOString()
     });
 
-    showStatus("Perfil registrado com sucesso! Aguardando sincronização…", "success");
+    showStatus("Perfil registrado com sucesso!", "success");
     document.getElementById("formRegister").reset();
 
-    // Aguarda provider sincronizar com o bloco confirmado antes de ler o contrato
-    for (let i = 0; i < 8; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      try {
-        const p = await contract.getProfile(currentAccount);
-        if (p && p[5]) {          // p[5] = bool exists
-          console.log("[handleRegister] Perfil disponível após", (i + 1) * 2, "s");
-          break;
-        }
-      } catch (_) { /* provider ainda não sincronizou, tenta de novo */ }
-    }
+    // Dados do perfil já confirmados pelo receipt — vá direto ao dashboard
     switchTab("tabDashboard");
   }
 }
@@ -991,24 +1111,116 @@ async function handleRegister(e) {
 // ═══════════════════════════════════════════════════════════
 
 /**
+ * Tenta obter o perfil via um contrato read-only.
+ * Retorna o profile ou null se falhar.
+ * @param {ethers.Contract} rc
+ * @param {string} account
+ * @param {string} label - identificador do provider para logs
+ * @returns {Promise<Array|null>}
+ */
+async function _tryGetProfile(rc, account, label) {
+  try {
+    console.log(`  [${label}] getProfile chamado para address: ${account}`);
+    const profile = await rc.getProfile(account);
+    const userId = profile[0].toString();
+    const exists = profile[5];
+    if (exists) {
+      console.log(`  [${label}] ✅ getProfile OK → userId: ${userId}, exists: true`, {
+        userId,
+        hNomeOficial: profile[1],
+        hNomeMuculmano: profile[2],
+        hMesquita: profile[3],
+        uri: profile[4],
+        exists
+      });
+    } else {
+      console.log(`  [${label}] getProfile retornou exists=false → perfil NÃO registrado para ${account} (userId retornado: ${userId})`);
+    }
+    return profile;
+  } catch (err) {
+    console.warn(`  [${label}] ❌ getProfile FALHOU para address ${account}:`, err.code || err.message);
+    return null;
+  }
+}
+
+/** Máximo de tentativas e intervalo entre cada uma (ms) */
+const DASHBOARD_MAX_RETRIES = 5;
+const DASHBOARD_RETRY_INTERVAL = 3000;
+const DASHBOARD_FIST_INTERVAL = 2000
+
+/**
  * Atualiza o painel do usuário logado.
+ * Lê dados do contrato via MetaMask (BrowserProvider).
+ * Mostra overlay bloqueante com contador de tempo e tentativas enquanto aguarda.
  * @param {number} _retries - controle interno de tentativas
  */
 async function refreshDashboard(_retries = 0) {
-  if (!contract || !currentAccount) return;
-
   const dashContent = document.getElementById("dashContent");
   const dashNot = document.getElementById("dashNotRegistered");
   const regAlert = document.getElementById("alreadyRegistered");
 
+  if (!currentAccount) {
+    dashContent.classList.add("hidden");
+    dashNot.classList.remove("hidden");
+    dashNot.innerHTML = '⚠️ Conecte sua carteira MetaMask primeiro.';
+    regAlert.classList.add("hidden");
+    showStatus("Conecte a carteira antes de acessar o painel.", "warning");
+    return;
+  }
+
+  if (!contractAddress || !contract) {
+    dashContent.classList.add("hidden");
+    dashNot.classList.remove("hidden");
+    dashNot.innerHTML = '⚠️ Configure o endereço do contrato no painel acima antes de consultar o painel.';
+    regAlert.classList.add("hidden");
+    showStatus("Adicione o endereço do contrato implantado para acessar o painel.", "warning");
+    return;
+  }
+
+  const attempt = _retries + 1;
+
+  // Mostra overlay bloqueante a partir da 1ª tentativa
+  if (_retries === 0) {
+    showDataLoadingOverlay(attempt, "MetaMask (BrowserProvider)");
+  } else {
+    updateDataLoadingOverlay(attempt, `Tentativa ${attempt} de ${DASHBOARD_MAX_RETRIES}… aguardando dados do contrato`, "");
+  }
+
+  console.group(`[refreshDashboard] Tentativa ${attempt}/${DASHBOARD_MAX_RETRIES}`);
+  console.log("  contractAddress:", contractAddress);
+  console.log("  currentAccount:", currentAccount);
+
+  // ── Diagnóstico: verificar rede MetaMask ──
   try {
-    console.log("[refreshDashboard] Chamando getProfile em:", contract.target || contractAddress, "para conta:", currentAccount);
-    const profile = await contract.getProfile(currentAccount);
+    const mmChainHex = await window.ethereum.request({ method: "eth_chainId" });
+    console.log("  [DIAG] MetaMask chainId:", parseInt(mmChainHex, 16));
+  } catch (diagErr) {
+    console.warn("  [DIAG] Falha no diagnóstico:", diagErr.message);
+  }
+
+  // ── Leitura via MetaMask (BrowserProvider) ──
+  let profile = null;
+
+  updateDataLoadingOverlay(attempt, `Tentativa ${attempt} de ${DASHBOARD_MAX_RETRIES}… lendo via MetaMask`, "MetaMask (BrowserProvider)");
+  const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+  profile = await _tryGetProfile(rc, currentAccount, "MetaMask");
+
+  if (!profile) {
+    console.warn(`  [refreshDashboard] ❌ Perfil NÃO obtido para ${currentAccount} na tentativa ${attempt}`);
+  }
+
+  console.groupEnd();
+
+  // ── Se obteve o perfil, renderiza o dashboard ──
+  if (profile) {
+    hideDataLoadingOverlay();
+
     const exists = profile[5]; // bool exists
 
     if (!exists) {
       dashContent.classList.add("hidden");
       dashNot.classList.remove("hidden");
+      dashNot.innerHTML = 'Você ainda não está registrado. Vá até a aba <strong>Registro</strong> primeiro.';
       regAlert.classList.add("hidden");
       return;
     }
@@ -1017,69 +1229,83 @@ async function refreshDashboard(_retries = 0) {
     dashContent.classList.remove("hidden");
     regAlert.classList.remove("hidden"); // mostra aviso na aba registro
 
+    // Usa MetaMask para as demais leituras
+    const rcRead = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+
     // DID
-    const did = await contract.getDID(currentAccount);
-    document.getElementById("dashDID").textContent = did;
+    try {
+      const did = await rcRead.getDID(currentAccount);
+      document.getElementById("dashDID").textContent = did;
+    } catch (_) {
+      document.getElementById("dashDID").textContent = "(erro ao obter DID)";
+    }
 
     // UserId
     document.getElementById("dashUserId").textContent = profile[0].toString();
 
     // Sheik badge
-    const sheik = await contract.isSheikh(currentAccount);
-    document.getElementById("dashSheikBadge").classList.toggle("hidden", !sheik);
+    try {
+      const sheik = await rcRead.isSheikh(currentAccount);
+      document.getElementById("dashSheikBadge").classList.toggle("hidden", !sheik);
+    } catch (_) {
+      document.getElementById("dashSheikBadge").classList.add("hidden");
+    }
 
     // Credenciais
-    const credIds = await contract.getCredentialsOf(currentAccount);
-    const container = document.getElementById("dashCredentials");
-    container.innerHTML = "";
+    try {
+      const credIds = await rcRead.getCredentialsOf(currentAccount);
+      const container = document.getElementById("dashCredentials");
+      container.innerHTML = "";
 
-    if (credIds.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">Nenhuma credencial encontrada.</p>';
-      return;
+      if (credIds.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">Nenhuma credencial encontrada.</p>';
+        return;
+      }
+
+      for (const cid of credIds) {
+        const c = await rcRead.getCredential(cid);
+        const div = document.createElement("div");
+        div.className = `cred-card ${c[7] ? "revoked" : ""}`;
+
+        const typeName = CRED_TYPE_NAMES[Number(c[1])] || "UNKNOWN";
+        const badgeCls = CRED_BADGE_CLASS[Number(c[1])] || "badge-initial";
+
+        div.innerHTML = `
+          <div class="cred-header">
+            <span class="badge ${badgeCls}">${typeName}</span>
+            ${c[7] ? '<span class="badge badge-revoked">REVOGADA</span>' : ""}
+            <span style="font-size:0.8rem;color:var(--text-secondary);">#${c[0].toString()}</span>
+          </div>
+          <div class="cred-detail">
+            <strong>Issuer:</strong> ${c[2] === contractAddress ? "Contrato (auto)" : shortAddr(c[2])}<br/>
+            <strong>Emitida em:</strong> ${formatTs(c[6])}<br/>
+            <strong>ClaimHash:</strong> ${c[4] !== ethers.ZeroHash ? c[4] : "—"}<br/>
+            ${c[5] ? `<strong>URI:</strong> ${c[5]}<br/>` : ""}
+          </div>
+        `;
+        container.appendChild(div);
+      }
+    } catch (credErr) {
+      console.warn("[refreshDashboard] Erro ao carregar credenciais:", credErr.message);
     }
 
-    for (const cid of credIds) {
-      const c = await contract.getCredential(cid);
-      const div = document.createElement("div");
-      div.className = `cred-card ${c[7] ? "revoked" : ""}`;
-
-      const typeName = CRED_TYPE_NAMES[Number(c[1])] || "UNKNOWN";
-      const badgeCls = CRED_BADGE_CLASS[Number(c[1])] || "badge-initial";
-
-      div.innerHTML = `
-        <div class="cred-header">
-          <span class="badge ${badgeCls}">${typeName}</span>
-          ${c[7] ? '<span class="badge badge-revoked">REVOGADA</span>' : ""}
-          <span style="font-size:0.8rem;color:var(--text-secondary);">#${c[0].toString()}</span>
-        </div>
-        <div class="cred-detail">
-          <strong>Issuer:</strong> ${c[2] === contractAddress ? "Contrato (auto)" : shortAddr(c[2])}<br/>
-          <strong>Emitida em:</strong> ${formatTs(c[6])}<br/>
-          <strong>ClaimHash:</strong> ${c[4] !== ethers.ZeroHash ? c[4] : "—"}<br/>
-          ${c[5] ? `<strong>URI:</strong> ${c[5]}<br/>` : ""}
-        </div>
-      `;
-      container.appendChild(div);
-    }
-
-  } catch (err) {
-    const isBadData = err.code === "BAD_DATA" || (err.message && err.message.includes('could not decode'));
-    console.error("[refreshDashboard] Erro (tentativa " + (_retries + 1) + "):", err);
-
-    if (isBadData && _retries < 4) {
-      console.log("[refreshDashboard] Tentando novamente em 3s…");
-      showStatus("Aguardando sincronização do contrato…", "info", 4000);
-      await new Promise(r => setTimeout(r, 3000));
-      return refreshDashboard(_retries + 1);
-    }
-    if (isBadData) {
-      dashContent.classList.add("hidden");
-      dashNot.classList.add("hidden");
-      showStatus("⚠️ Não foi possível ler o contrato. Verifique se o endereço está correto e se o contrato IslamicPassport foi implantado nesse endereço.", "error", 10000);
-    } else {
-      showStatus("Erro ao carregar painel: " + (err.reason || err.message), "error");
-    }
+    return;
   }
+
+  // ── Perfil não obtido — tentar novamente ou desistir ──
+  if (_retries < DASHBOARD_MAX_RETRIES - 1) {
+    const interval = _retries === 0 ? DASHBOARD_FIST_INTERVAL : DASHBOARD_RETRY_INTERVAL;
+    console.log(`[refreshDashboard] Perfil não disponível. Próxima tentativa em ${interval / 1000}s… (tentativa ${attempt + 1}/${DASHBOARD_MAX_RETRIES})`);
+    updateDataLoadingOverlay(attempt, `Dados ainda não disponíveis. Próxima tentativa em ${interval / 1000}s…`, "Aguardando…");
+    await new Promise(r => setTimeout(r, interval));
+    return refreshDashboard(_retries + 1);
+  }
+
+  // Esgotou tentativas
+  hideDataLoadingOverlay();
+  dashContent.classList.add("hidden");
+  dashNot.classList.add("hidden");
+  showStatus(`⚠️ Não foi possível ler os dados do contrato após ${DASHBOARD_MAX_RETRIES} tentativas. Verifique se a rede está acessível via MetaMask e se o contrato foi implantado.`, "error", 10000);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1090,10 +1316,18 @@ async function refreshDashboard(_retries = 0) {
  * Carrega e exibe a lista de sheiks.
  */
 async function refreshSheikhs() {
-  if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
+  if (!currentAccount) {
+    showStatus("Conecte a carteira antes de consultar os sheiks.", "warning");
+    return;
+  }
+  if (!contractAddress || !contract) {
+    showStatus("Adicione o endereço do contrato implantado antes de consultar os sheiks.", "warning");
+    return;
+  }
 
   try {
-    const sheikhs = await contract.listSheikhs();
+    const rcSheikhs = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+    const sheikhs = await rcSheikhs.listSheikhs();
     const tbody = document.getElementById("sheikhTableBody");
     tbody.innerHTML = "";
 
@@ -1105,7 +1339,7 @@ async function refreshSheikhs() {
     for (let i = 0; i < sheikhs.length; i++) {
       const addr = sheikhs[i];
       let did = "";
-      try { did = await contract.getDID(addr); } catch (_) { did = "—"; }
+      try { did = await rcSheikhs.getDID(addr); } catch (_) { did = "—"; }
 
       const tr = document.createElement("tr");
       tr.innerHTML = `
@@ -1158,6 +1392,30 @@ async function handleAttest(e) {
   );
 
   if (receipt) {
+    console.log(`[handleAttest] TX hash: ${receipt.hash}`);
+    console.log(`[handleAttest] Contrato: ${contractAddress}`);
+    console.log(`[handleAttest] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
+    if (receipt.logs && receipt.logs.length > 0) {
+      for (let i = 0; i < receipt.logs.length; i++) {
+        const log = receipt.logs[i];
+        try {
+          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
+          if (parsed) {
+            console.log(`[handleAttest] Log[${i}] parsed event: ${parsed.name}`, parsed.args);
+            if (parsed.name === "CredentialIssued") {
+              console.log(`[handleAttest] ✅ CredentialIssued → credentialId: ${parsed.args[0].toString()}, type: ${CRED_TYPE_NAMES[Number(parsed.args[1])] || parsed.args[1]}, issuer: ${parsed.args[2]}, subject: ${parsed.args[3]}`);
+            } else if (parsed.name === "AttestedMuslim") {
+              console.log(`[handleAttest] ✅ AttestedMuslim → issuer: ${parsed.args[0]}, subject: ${parsed.args[1]}, credentialId: ${parsed.args[2].toString()}`);
+            }
+          }
+        } catch (parseErr) {
+          console.warn(`[handleAttest] Log[${i}] parse falhou:`, parseErr.message);
+        }
+      }
+    } else {
+      console.warn("[handleAttest] Nenhum log no receipt.", receipt);
+    }
+
     showStatus("Atesto emitido com sucesso!", "success");
     document.getElementById("formAttest").reset();
   }
@@ -1200,6 +1458,30 @@ async function handlePromote(e) {
   );
 
   if (receipt) {
+    console.log(`[handlePromote] TX hash: ${receipt.hash}`);
+    console.log(`[handlePromote] Contrato: ${contractAddress}`);
+    console.log(`[handlePromote] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
+    if (receipt.logs && receipt.logs.length > 0) {
+      for (let i = 0; i < receipt.logs.length; i++) {
+        const log = receipt.logs[i];
+        try {
+          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
+          if (parsed) {
+            console.log(`[handlePromote] Log[${i}] parsed event: ${parsed.name}`, parsed.args);
+            if (parsed.name === "CredentialIssued") {
+              console.log(`[handlePromote] ✅ CredentialIssued → credentialId: ${parsed.args[0].toString()}, type: ${CRED_TYPE_NAMES[Number(parsed.args[1])] || parsed.args[1]}, issuer: ${parsed.args[2]}, subject: ${parsed.args[3]}`);
+            } else if (parsed.name === "SheikhPromoted") {
+              console.log(`[handlePromote] ✅ SheikhPromoted → issuer: ${parsed.args[0]}, subject: ${parsed.args[1]}, credentialId: ${parsed.args[2].toString()}`);
+            }
+          }
+        } catch (parseErr) {
+          console.warn(`[handlePromote] Log[${i}] parse falhou:`, parseErr.message);
+        }
+      }
+    } else {
+      console.warn("[handlePromote] Nenhum log no receipt.", receipt);
+    }
+
     showStatus("Promoção a sheik realizada com sucesso!", "success");
     document.getElementById("formPromote").reset();
   }
@@ -1226,6 +1508,25 @@ async function handleRevoke(e) {
   );
 
   if (receipt) {
+    console.log(`[handleRevoke] TX hash: ${receipt.hash}`);
+    console.log(`[handleRevoke] Contrato: ${contractAddress}`);
+    console.log(`[handleRevoke] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
+    if (receipt.logs && receipt.logs.length > 0) {
+      for (let i = 0; i < receipt.logs.length; i++) {
+        const log = receipt.logs[i];
+        try {
+          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
+          if (parsed && parsed.name === "CredentialRevoked") {
+            console.log(`[handleRevoke] ✅ CredentialRevoked → credentialId: ${parsed.args[0].toString()}, revokedBy: ${parsed.args[1]}`);
+          }
+        } catch (parseErr) {
+          console.warn(`[handleRevoke] Log[${i}] parse falhou:`, parseErr.message);
+        }
+      }
+    } else {
+      console.warn("[handleRevoke] Nenhum log no receipt.", receipt);
+    }
+
     showStatus(`Credencial #${credId} revogada com sucesso!`, "success");
     document.getElementById("formRevoke").reset();
   }

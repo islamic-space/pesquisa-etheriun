@@ -99,6 +99,20 @@
     </div>
   </div>
 
+  <!-- ═══════════ Data Loading Overlay ═══════════ -->
+  <div id="dataLoadingOverlay" class="modal-overlay hidden">
+    <div class="modal-box modal-box-sm">
+      <div style="text-align:center;">
+        <div class="tx-spinner"></div>
+        <p id="dataLoadingMsg" style="margin:0.8rem 0 0.4rem;">Aguardando disponibilidade dos dados…</p>
+        <p id="dataLoadingCounter" style="font-size:0.85rem;color:var(--text-secondary);margin:0;">
+          Tentativa <span id="dataLoadingAttempt">1</span> · <span id="dataLoadingTime">0</span>s decorridos
+        </p>
+        <p id="dataLoadingProvider" style="font-size:0.75rem;color:var(--text-secondary);margin:0.3rem 0 0;"></p>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════ Navigation ═══════════ -->
   <nav class="tabs" id="mainTabs">
     <button class="active" data-tab="tabRegister">Registro</button>

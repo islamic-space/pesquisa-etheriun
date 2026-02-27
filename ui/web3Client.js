@@ -47,6 +47,19 @@ const Web3Client = (() => {
     return _provider;
   }
 
+  /**
+   * Cria uma instância de contrato read-only via BrowserProvider (MetaMask).
+   * Todas as leituras (view/pure) passam pelo MetaMask como proxy RPC.
+   * @param {Array|string} abi
+   * @param {string} address
+   * @returns {ethers.Contract}
+   */
+  function getReadContract(abi, address) {
+    // Fresh BrowserProvider every call — avoids MetaMask eth_call cache
+    const fresh = new ethers.BrowserProvider(window.ethereum);
+    return new ethers.Contract(address, abi, fresh);
+  }
+
   // ─────────────────────────────────────────────
   //  Conexão
   // ─────────────────────────────────────────────
@@ -102,7 +115,7 @@ const Web3Client = (() => {
     const addr = address || _address;
     if (!addr) throw new Error("Nenhum endereço conectado.");
 
-    // Usa RPC direto para compatibilidade com Ganache
+    // Usa MetaMask como proxy RPC
     const hexBalance = await window.ethereum.request({
       method: "eth_getBalance",
       params: [addr, "latest"]
@@ -175,13 +188,13 @@ const Web3Client = (() => {
     });
     const gasLimit = rawGas * 3n / 2n; // +50%
 
-    // Obtém gasPrice via RPC legado (Ganache não suporta eth_maxPriorityFeePerGas)
+    // Obtém gasPrice via RPC legado (via MetaMask)
     let gasPrice;
     try {
       const hexPrice = await window.ethereum.request({ method: "eth_gasPrice" });
       gasPrice = BigInt(hexPrice);
     } catch (_) {
-      // Fallback: preço padrão do Ganache (20 gwei)
+      // Fallback: preço padrão (20 gwei)
       gasPrice = ethers.parseUnits("20", "gwei");
     }
 
@@ -265,6 +278,7 @@ const Web3Client = (() => {
   return {
     isMetaMaskAvailable,
     getProviderFromMetaMask,
+    getReadContract,
     connectWallet,
     getBalanceETH,
     getSigner,
