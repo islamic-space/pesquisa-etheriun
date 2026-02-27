@@ -16,16 +16,87 @@
       <div class="wallet-info hidden" id="walletInfo">
         <div id="walletAddress"></div>
         <div>Chain <span class="chain-badge" id="walletChain">--</span></div>
+        <div class="wallet-balance">Saldo: <strong id="walletBalance">--</strong> ETH</div>
       </div>
       <button id="btnConnect">Conectar MetaMask</button>
+      <button id="btnDisconnect" class="btn btn-danger btn-sm hidden" style="margin-left:8px;">Desconectar</button>
     </div>
   </header>
 
-  <!-- ═══════════ Config bar ═══════════ -->
-  <div class="config-bar">
-    <label>Contrato:</label>
-    <input type="text" id="inputContractAddr" placeholder="0x... (endereço do contrato implantado)" />
-    <button id="btnSetContract">Definir</button>
+  <!-- ═══════════ Network Warning ═══════════ -->
+  <div id="networkWarning" class="alert alert-warning hidden" style="margin:0;border-radius:0;text-align:center;">
+    ⚠️ Rede incorreta! Selecione a rede <strong>Ganache (localhost:7545)</strong> no MetaMask.
+    <button id="btnSwitchNetwork" class="btn btn-sm btn-primary" style="margin-left:12px;">Trocar para Ganache</button>
+  </div>
+
+  <!-- ═══════════ Wallet Panel ═══════════ -->
+  <div id="walletPanel" class="wallet-panel hidden">
+    <div class="wallet-panel-inner">
+      <div class="wallet-panel-col">
+        <label>Carteira (Rede / Contas)</label>
+        <select id="selectNetwork" class="wallet-select">
+          <option value="">— conecte o MetaMask —</option>
+        </select>
+        <select id="selectAccount" class="wallet-select">
+          <option value="">— nenhuma conta —</option>
+        </select>
+      </div>
+      <div class="wallet-panel-col">
+        <label>Contrato Implantado</label>
+        <div class="contract-add-row">
+          <select id="selectContract" class="wallet-select" style="flex:1;">
+            <option value="">— adicione endereços de contrato —</option>
+          </select>
+          <button id="btnRemoveContract" class="btn btn-danger btn-sm" title="Remover contrato selecionado">✕</button>
+        </div>
+        <div class="contract-add-row">
+          <input type="text" id="inputContractAddr" placeholder="0x... (endereço do contrato)" />
+          <button id="btnAddContract" class="btn btn-primary btn-sm">Adicionar</button>
+        </div>
+        <div class="contract-add-row" style="margin-top:4px;">
+          <input type="number" id="inputScanContracts" value="5" min="1" max="100" style="width:60px;" title="Máx. contratos a buscar" />
+          <label style="font-size:0.72rem;align-self:center;">contratos</label>
+          <input type="number" id="inputScanBlocks" value="1000" min="100" max="100000" step="1000" style="width:80px;" title="Blocos por lote (busca do mais recente para o mais antigo)" />
+          <label style="font-size:0.72rem;align-self:center;">blocos</label>
+          <button id="btnScanContracts" class="btn btn-accent btn-sm" title="Escanear blockchain por contratos implantados">🔍 Buscar</button>
+        </div>
+        <div id="scanProgress" style="font-size:0.72rem;color:var(--text-secondary);margin-top:2px;" class="hidden"></div>
+      </div>
+      <div class="wallet-panel-col wallet-panel-status">
+        <div class="wallet-status-label" id="walletStatusLabel">Desconectado</div>
+        <div class="wallet-status-balance hidden" id="walletPanelBalance">
+          <span>Saldo:</span> <strong id="walletPanelBalanceValue">0.0000</strong> <span>ETH</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ TX Confirmation Modal ═══════════ -->
+  <div id="txModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h3>Confirmar Transação</h3>
+      <div class="modal-row"><span>Ação:</span><strong id="txModalAction">—</strong></div>
+      <div class="modal-row"><span>Custo estimado:</span><strong id="txModalCost">— ETH</strong></div>
+      <div class="modal-row"><span>Saldo atual:</span><strong id="txModalBalance">— ETH</strong></div>
+      <div class="modal-row modal-warning hidden" id="txModalWarning">
+        <span class="alert alert-warning" style="margin:0;padding:4px 10px;">Saldo pode ser insuficiente!</span>
+      </div>
+      <div class="modal-actions">
+        <button id="txModalConfirm" class="btn btn-primary">Confirmar</button>
+        <button id="txModalCancel" class="btn btn-danger">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ TX Status Overlay ═══════════ -->
+  <div id="txOverlay" class="modal-overlay hidden">
+    <div class="modal-box modal-box-sm">
+      <div id="txOverlayContent">
+        <div class="tx-spinner"></div>
+        <p id="txOverlayMsg">Enviando transação…</p>
+        <p class="text-mono" id="txOverlayHash" style="font-size:0.75rem;word-break:break-all;"></p>
+      </div>
+    </div>
   </div>
 
   <!-- ═══════════ Navigation ═══════════ -->
@@ -203,9 +274,8 @@
 
   <!-- ═══════════ Scripts ═══════════ -->
   <!-- ethers.js v6 via CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"
-          integrity="sha512-OEFxS5EkfgbB1BRWDNCOHS7JQKaKFApXm89E3ZxZE+fDcGfkUEMSp/K4pYqbcMDRD2IF4kNLA8QFrNR5JqTnQ=="
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <script src="web3Client.js"></script>
   <script src="app.js"></script>
 
 </body>
