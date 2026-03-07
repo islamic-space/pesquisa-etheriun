@@ -168,6 +168,15 @@ nav.tabs button.active {
   border-bottom-color: var(--primary);
 }
 
+nav.tabs button:disabled,
+nav.tabs button.tab-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+  color: var(--text-secondary);
+  border-bottom-color: transparent;
+}
+
 /* ───── Main content ───── */
 
 main {

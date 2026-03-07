@@ -55,6 +55,12 @@ let contractAddress = null;
 /** @type {string[]} Lista de endereços de contratos registrados */
 let contractList = [];
 
+/** @type {boolean} Indica se o usuário atual já está registrado on-chain */
+let isRegistered = false;
+
+/** @type {boolean} Indica se o usuário atual é sheik */
+let isSheik = false;
+
 /**
  * Nomes dos tipos de credencial (espelhando o enum do contrato).
  */
@@ -212,6 +218,86 @@ function setOnchainButtonsEnabled(enabled) {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  Controle de acesso às abas (baseado no estado on-chain)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Consulta o contrato para verificar se o usuário está registrado e se é sheik.
+ * Habilita/desabilita as abas conforme:
+ *  - Registro: desabilitada se já registrado
+ *  - Atestar / Promover: habilitada apenas para sheiks
+ */
+async function refreshTabAccess() {
+  const tabRegister = document.querySelector('nav.tabs button[data-tab="tabRegister"]');
+  const tabAttest   = document.querySelector('nav.tabs button[data-tab="tabAttest"]');
+
+  // Estado padrão: tudo habilitado (reset)
+  isRegistered = false;
+  isSheik = false;
+
+  if (!currentAccount || !contractAddress || !contract) {
+    // Sem contrato — mantém abas habilitadas (formulários já exigem contrato)
+    tabRegister.disabled = false;
+    tabRegister.classList.remove("tab-disabled");
+    tabRegister.title = "";
+    tabAttest.disabled = false;
+    tabAttest.classList.remove("tab-disabled");
+    tabAttest.title = "";
+    return;
+  }
+
+  try {
+    const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+
+    // Verifica registro
+    try {
+      const profile = await rc.getProfile(currentAccount);
+      isRegistered = !!profile[5]; // profile[5] = exists
+    } catch (_) {}
+
+    // Verifica sheik
+    try {
+      isSheik = await rc.isSheikh(currentAccount);
+    } catch (_) {}
+
+    console.log(`[refreshTabAccess] isRegistered: ${isRegistered}, isSheik: ${isSheik}`);
+
+    // ── Aba Registro ──
+    if (isRegistered) {
+      tabRegister.disabled = true;
+      tabRegister.classList.add("tab-disabled");
+      tabRegister.title = "Você já possui cadastro on-chain";
+      // Se a aba ativa era Registro, redireciona para Meu Painel
+      if (tabRegister.classList.contains("active")) {
+        switchTab("tabDashboard");
+      }
+    } else {
+      tabRegister.disabled = false;
+      tabRegister.classList.remove("tab-disabled");
+      tabRegister.title = "";
+    }
+
+    // ── Aba Atestar / Promover ──
+    if (!isSheik) {
+      tabAttest.disabled = true;
+      tabAttest.classList.add("tab-disabled");
+      tabAttest.title = "Disponível apenas para Sheiks";
+      // Se a aba ativa era Atestar, redireciona
+      if (tabAttest.classList.contains("active")) {
+        switchTab("tabDashboard");
+      }
+    } else {
+      tabAttest.disabled = false;
+      tabAttest.classList.remove("tab-disabled");
+      tabAttest.title = "";
+    }
+
+  } catch (err) {
+    console.warn("[refreshTabAccess] Erro ao verificar status:", err.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Atualizar saldo na UI
 // ═══════════════════════════════════════════════════════════
 
@@ -236,63 +322,47 @@ async function refreshBalance() {
 /**
  * Conecta ao MetaMask usando Web3Client, atualiza toda a UI.
  */
-// ChainIds aceitos para Ganache
-const GANACHE_CHAIN_IDS = ["1337", "5777"];
+/**
+ * Mapa de chainId para nome amigável de redes conhecidas.
+ */
+const KNOWN_NETWORKS = {
+  "1":     "Ethereum Mainnet",
+  "5":     "Goerli Testnet",
+  "11155111": "Sepolia Testnet",
+  "17000":  "Holesky Testnet",
+  "10":    "Optimism",
+  "42161": "Arbitrum One",
+  "137":   "Polygon Mainnet",
+  "80001": "Polygon Mumbai",
+  "80002": "Polygon Amoy",
+  "56":    "BNB Smart Chain",
+  "43114": "Avalanche C-Chain",
+  "250":   "Fantom Opera",
+  "100":   "Gnosis Chain",
+  "1337":  "Localhost 1337",
+  "5777":  "Localhost 5777",
+  "31337": "Hardhat (31337)"
+};
 
 /**
- * Verifica se o chainId atual é de uma rede Ganache.
+ * Retorna o nome amigável da rede a partir do chainId.
+ * Tenta o mapa local e, se não encontrar, consulta o MetaMask.
  * @param {string} chainId
- * @returns {boolean}
+ * @returns {Promise<string>}
  */
-function isGanacheNetwork(chainId) {
-  return GANACHE_CHAIN_IDS.includes(chainId);
-}
+async function getNetworkFriendlyName(chainId) {
+  if (KNOWN_NETWORKS[chainId]) return KNOWN_NETWORKS[chainId];
 
-/**
- * Mostra/esconde o aviso de rede incorreta.
- * @param {boolean} show
- */
-function toggleNetworkWarning(show) {
-  const el = document.getElementById("networkWarning");
-  if (show) {
-    el.classList.remove("hidden");
-  } else {
-    el.classList.add("hidden");
-  }
-}
-
-/**
- * Tenta trocar a rede no MetaMask para Ganache (localhost:7545).
- */
-async function switchToGanache() {
+  // Fallback: tenta obter o nome via ethers provider
   try {
-    // Tenta trocar para chainId 0x539 (1337)
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: "0x539" }] // 1337
-    });
-  } catch (switchError) {
-    // Se a rede não existe no MetaMask, tenta adicionar
-    if (switchError.code === 4902) {
-      try {
-        await window.ethereum.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: "0x539",
-            chainName: "Ganache Local",
-            nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-            rpcUrls: ["http://127.0.0.1:7545"]
-          }]
-        });
-      } catch (addError) {
-        console.error("[switchToGanache] Erro ao adicionar rede:", addError);
-        showStatus("Não foi possível adicionar a rede Ganache. Adicione manualmente no MetaMask: RPC http://127.0.0.1:7545, Chain ID 1337.", "error", 12000);
-      }
-    } else {
-      console.error("[switchToGanache] Erro ao trocar rede:", switchError);
-      showStatus("Não foi possível trocar de rede. Troque manualmente no MetaMask para Ganache (Chain ID 1337).", "error", 8000);
+    const provider = Web3Client.getProviderFromMetaMask();
+    const network = await provider.getNetwork();
+    if (network.name && network.name !== "unknown") {
+      return network.name + " (Chain " + chainId + ")";
     }
-  }
+  } catch (_) {}
+
+  return "Rede Personalizada (Chain " + chainId + ")";
 }
 
 /**
@@ -317,11 +387,11 @@ function disconnectWallet() {
   document.getElementById("walletStatusLabel").classList.remove("wallet-connected");
   document.getElementById("walletPanelBalance").classList.add("hidden");
 
-  // Esconde aviso de rede
-  toggleNetworkWarning(false);
-
   // Desabilita botões on-chain
   setOnchainButtonsEnabled(false);
+
+  // Reseta abas (habilita todas novamente)
+  refreshTabAccess();
 
   showStatus("Carteira desconectada.", "info", 3000);
 }
@@ -346,14 +416,6 @@ async function connectWallet() {
     currentAccount = address;
     currentChainId = chainId;
 
-    // Verifica rede
-    if (!isGanacheNetwork(chainId)) {
-      toggleNetworkWarning(true);
-      showStatus(`Rede ${chainId} não é Ganache. Troque para a rede Ganache (Chain ID 1337 ou 5777).`, "warning", 10000);
-    } else {
-      toggleNetworkWarning(false);
-    }
-
     // Atualiza header
     document.getElementById("walletAddress").textContent = shortAddr(currentAccount);
     document.getElementById("walletChain").textContent = currentChainId;
@@ -366,10 +428,10 @@ async function connectWallet() {
     document.getElementById("walletStatusLabel").textContent = "Conectado: " + shortAddr(currentAccount);
     document.getElementById("walletStatusLabel").classList.add("wallet-connected");
 
-    // Popula select de rede
+    // Popula select de rede com nome amigável
     const selNet = document.getElementById("selectNetwork");
-    const netLabel = isGanacheNetwork(chainId) ? `Chain ${chainId} (Ganache)` : `Chain ${chainId} (⚠️ não é Ganache)`;
-    selNet.innerHTML = `<option value="${chainId}">${netLabel}</option>`;
+    const netFriendlyName = await getNetworkFriendlyName(chainId);
+    selNet.innerHTML = `<option value="${chainId}">${netFriendlyName} (Chain ${chainId})</option>`;
 
     // Popula select de contas (todas as contas autorizadas no MetaMask)
     await refreshAccountsList();
@@ -378,7 +440,7 @@ async function connectWallet() {
     await refreshBalance();
 
     // Habilita botões on-chain após conexão
-    console.log("[connectWallet] chainId:", chainId, "isGanache:", isGanacheNetwork(chainId));
+    console.log("[connectWallet] chainId:", chainId, "network:", netFriendlyName);
     setOnchainButtonsEnabled(true);
 
     showStatus(`Conectado: ${shortAddr(currentAccount)} (chain ${currentChainId})`, "success");
@@ -429,9 +491,20 @@ async function refreshAccountsList() {
         const b = await provider.getBalance(acc);
         bal = parseFloat(ethers.formatEther(b)).toFixed(4);
       } catch (_) {}
+
+      // Tenta resolver nome ENS (reverse lookup) para exibir nome amigável
+      let ensName = null;
+      try {
+        ensName = await provider.lookupAddress(acc);
+      } catch (_) {}
+
       const opt = document.createElement("option");
       opt.value = acc;
-      opt.textContent = `${shortAddr(acc)} (${bal} ETH)`;
+      if (ensName) {
+        opt.textContent = `${ensName} (${shortAddr(acc)}) — ${bal} ETH`;
+      } else {
+        opt.textContent = `${shortAddr(acc)} — ${bal} ETH`;
+      }
       if (acc.toLowerCase() === currentAccount.toLowerCase()) opt.selected = true;
       sel.appendChild(opt);
     }
@@ -761,6 +834,10 @@ async function attachContract(addr) {
     } else {
       showStatus(`Contrato configurado: ${shortAddr(addr)} — bytecode não confirmado (pode ser cache do MetaMask).`, "warning", 8000);
     }
+
+    // Atualiza acesso às abas com base no estado on-chain
+    await refreshTabAccess();
+
   } catch (err) {
     console.error("[attachContract] Erro:", err);
     showStatus("Endereço de contrato inválido: " + err.message, "error");
@@ -931,7 +1008,7 @@ async function executeWithConfirmation(actionName, methodName, args = []) {
     return null;
   }
 
-  // 3. Enviar transação (forçar tipo legado para compatibilidade com Ganache)
+  // 3. Enviar transação (tipo legado para máxima compatibilidade entre redes)
   let tx;
   try {
     showTxOverlay("Enviando transação… Confirme no MetaMask.");
@@ -976,11 +1053,15 @@ async function executeWithConfirmation(actionName, methodName, args = []) {
  * @param {string} tabId
  */
 function switchTab(tabId) {
+  // Impede navegação para abas desabilitadas
+  const tabBtn = document.querySelector(`nav.tabs button[data-tab="${tabId}"]`);
+  if (tabBtn && tabBtn.disabled) return;
+
   document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
   document.querySelectorAll("nav.tabs button").forEach(b => b.classList.remove("active"));
 
   document.getElementById(tabId).classList.add("active");
-  document.querySelector(`nav.tabs button[data-tab="${tabId}"]`).classList.add("active");
+  tabBtn.classList.add("active");
 
   // Ações ao entrar na aba
   if (tabId === "tabDashboard") {
@@ -1100,6 +1181,9 @@ async function handleRegister(e) {
 
     showStatus("Perfil registrado com sucesso!", "success");
     document.getElementById("formRegister").reset();
+
+    // Atualiza acesso às abas (agora registrado → desabilita Registro)
+    await refreshTabAccess();
 
     // Dados do perfil já confirmados pelo receipt — vá direto ao dashboard
     switchTab("tabDashboard");
@@ -1653,9 +1737,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Desconectar carteira ──
   document.getElementById("btnDisconnect").addEventListener("click", disconnectWallet);
-
-  // ── Trocar para rede Ganache ──
-  document.getElementById("btnSwitchNetwork").addEventListener("click", switchToGanache);
 
   // ── Adicionar contrato ──
   document.getElementById("btnAddContract").addEventListener("click", () => {
