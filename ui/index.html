@@ -230,6 +230,17 @@
             <input type="text" id="attestSubject" placeholder="0x..." required />
           </div>
           <div class="form-group">
+            <label>Pedido/Certificado JSON (opcional)</label>
+            <textarea id="attestRequestJSON" rows="5" placeholder="Cole aqui o JSON recebido do solicitante..."></textarea>
+            <small style="display:block;margin-top:0.35rem;color:var(--text-secondary);">
+              Você pode colar o conteúdo de <code>attest-request-*.json</code> ou fazer upload abaixo para carregar automaticamente.
+            </small>
+            <label class="mt-1" style="font-size:0.85rem;font-weight:500;display:block;">
+              Upload de arquivo JSON
+              <input type="file" id="attestJsonFile" accept=".json,application/json" />
+            </label>
+          </div>
+          <div class="form-group">
             <label>URI off-chain (opcional)</label>
             <input type="text" id="attestUri" placeholder="ipfs://..." />
           </div>

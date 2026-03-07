@@ -211,6 +211,156 @@ function downloadJSON(data, filename) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Tenta extrair um endereço Ethereum de uma string (direta ou DID).
+ * @param {string} value
+ * @returns {string|null}
+ */
+function extractAddressCandidate(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (ethers.isAddress(trimmed)) return trimmed;
+  if (trimmed.startsWith("did:")) {
+    const parts = trimmed.split(":");
+    const maybeAddr = parts[parts.length - 1];
+    if (ethers.isAddress(maybeAddr)) return maybeAddr;
+  }
+  return null;
+}
+
+function deriveSubjectFromRequest(data) {
+  const candidates = [
+    data.subject,
+    data.subjectAddress,
+    data.subjectWallet,
+    data.subjectAddr,
+    data.subjectAccount,
+    data.subjectId,
+    data.subjectID,
+    data.subjectDid,
+    data.subjectDID,
+    data.credentialSubject?.id,
+    data.credentialSubject?.address,
+    data.credentialSubject?.wallet,
+    data.credentialSubject?.ethAddress,
+    data.credentialSubject?.ethereumAddress
+  ];
+  for (const candidate of candidates) {
+    const addr = extractAddressCandidate(candidate);
+    if (addr) return addr;
+  }
+  return null;
+}
+
+function deriveUriFromRequest(data) {
+  const candidates = [
+    data.uri,
+    data.attestUri,
+    data.credentialUri,
+    data.credentialURI,
+    data.offchainUri,
+    data.offchainURI,
+    data.metadataUri,
+    data.metadataURI,
+    data.credential?.uri,
+    data.credential?.metadataURI,
+    data.credentialSubject?.uri
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Lê o JSON informado na aba de atesto e extrai dados úteis.
+ * @param {{silent?: boolean}} [options]
+ * @returns {{data: object, subject?: string, uri?: string}|{error: true}|null}
+ */
+function parseAttestRequestJson({ silent = false } = {}) {
+  const textarea = document.getElementById("attestRequestJSON");
+  if (!textarea) return null;
+  const raw = textarea.value.trim();
+  if (!raw) return null;
+
+  try {
+    const data = JSON.parse(raw);
+    return {
+      data,
+      subject: deriveSubjectFromRequest(data),
+      uri: deriveUriFromRequest(data)
+    };
+  } catch (err) {
+    if (!silent) {
+      showStatus("Não foi possível ler o JSON do pedido/certificado. Verifique o conteúdo.", "error");
+    }
+    console.warn("[parseAttestRequestJson] Falha ao processar JSON:", err.message);
+    return { error: true };
+  }
+}
+
+/**
+ * Preenche campos do formulário de atesto com dados derivados do JSON.
+ * @param {{subject?: string, uri?: string, error?: boolean}|null} parsed
+ * @param {{showFeedback?: boolean}} [options]
+ */
+function autofillAttestFieldsFromRequest(parsed, { showFeedback = false } = {}) {
+  if (!parsed || parsed.error) return;
+  const subjectInput = document.getElementById("attestSubject");
+  const uriInput = document.getElementById("attestUri");
+
+  let changed = false;
+
+  if (parsed.subject && subjectInput && !subjectInput.value.trim()) {
+    subjectInput.value = parsed.subject;
+    changed = true;
+  }
+
+  if (parsed.uri && uriInput && !uriInput.value.trim()) {
+    uriInput.value = parsed.uri;
+    changed = true;
+  }
+
+  if (changed && showFeedback) {
+    showStatus("Campos preenchidos automaticamente a partir do JSON fornecido.", "info", 3000);
+  }
+}
+
+/**
+ * Handler do upload de arquivo JSON na aba de atesto.
+ * @param {Event} event
+ */
+async function handleAttestJsonFileChange(event) {
+  const input = event.target;
+  const file = input?.files?.[0];
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const textarea = document.getElementById("attestRequestJSON");
+    if (textarea) {
+      textarea.value = text.trim();
+    }
+    const parsed = parseAttestRequestJson({ silent: true });
+    if (parsed && !parsed.error) {
+      autofillAttestFieldsFromRequest(parsed, { showFeedback: false });
+      showStatus(`Arquivo ${file.name} carregado.`, "success", 3500);
+    } else {
+      showStatus("Arquivo carregado, mas o conteúdo não é um JSON válido.", "error");
+    }
+  } catch (err) {
+    showStatus("Não foi possível ler o arquivo JSON.", "error");
+    console.warn("[handleAttestJsonFileChange] Erro ao ler arquivo:", err.message);
+  } finally {
+    if (input) {
+      input.value = "";
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 //  Gerenciamento de estado on-chain (habilitar/desabilitar)
 // ═══════════════════════════════════════════════════════════
@@ -1544,8 +1694,17 @@ async function handleAttest(e) {
   if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
   if (!canAttestMuslim) { showStatus("Apenas sheiks com certificado ativo podem atestar muçulmanos neste contrato.", "warning"); return; }
 
-  const subject = document.getElementById("attestSubject").value.trim();
-  const uri = document.getElementById("attestUri").value.trim();
+  const subjectInput = document.getElementById("attestSubject");
+  const uriInput = document.getElementById("attestUri");
+
+  // Garante que JSON recém colado também preencha os campos antes de validar
+  const parsedRequest = parseAttestRequestJson({ silent: true });
+  if (parsedRequest && !parsedRequest.error) {
+    autofillAttestFieldsFromRequest(parsedRequest, { showFeedback: false });
+  }
+
+  const subject = subjectInput.value.trim();
+  const uri = uriInput.value.trim();
 
   if (!ethers.isAddress(subject)) {
     showStatus("Endereço inválido.", "error");
@@ -1886,6 +2045,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Atesto ──
   document.getElementById("formAttest").addEventListener("submit", handleAttest);
+  const attestRequestTextarea = document.getElementById("attestRequestJSON");
+  if (attestRequestTextarea) {
+    const handleParseAttestJson = () => {
+      const parsed = parseAttestRequestJson({ silent: true });
+      if (parsed && !parsed.error) {
+        autofillAttestFieldsFromRequest(parsed, { showFeedback: true });
+      }
+    };
+    ["blur", "change"].forEach(evt => attestRequestTextarea.addEventListener(evt, handleParseAttestJson));
+  }
+  const attestJsonFileInput = document.getElementById("attestJsonFile");
+  if (attestJsonFileInput) {
+    attestJsonFileInput.addEventListener("change", handleAttestJsonFileChange);
+  }
 
   // ── Promoção ──
   document.getElementById("formPromote").addEventListener("submit", handlePromote);

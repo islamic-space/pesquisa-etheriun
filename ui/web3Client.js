@@ -20,6 +20,38 @@ const Web3Client = (() => {
   /** @type {string|null} */
   let _chainId = null;
 
+  /** @type {object|null} Diagnóstico sobre providers detectados */
+  let _providerDiagnostics = null;
+
+  /**
+   * Retorna window.ethereum garantindo que ainda seja atribuível.
+   * SE(S) pode congelar o objeto e impedir MetaMask de injetar provider.
+   * @returns {{ethereum: any, hasMultiple: boolean, isReadOnly: boolean}}
+   */
+  function _resolveEthereum() {
+    const globalWin = typeof window !== "undefined" ? window : undefined;
+    if (!globalWin) {
+      return { ethereum: undefined, hasMultiple: false, isReadOnly: false };
+    }
+
+    // Alguns hardenings (SES) expõem "ethereum.providers" com várias wallets
+    const multi = Array.isArray(globalWin.ethereum?.providers) && globalWin.ethereum.providers.length > 0;
+
+    let chosen = globalWin.ethereum;
+    if (multi) {
+      chosen = globalWin.ethereum.providers.find(p => p?.isMetaMask) || globalWin.ethereum.providers[0];
+    }
+
+    const descriptor = Object.getOwnPropertyDescriptor(globalWin, "ethereum");
+    const readOnly = !!descriptor && typeof descriptor.set !== "function";
+
+    return {
+      ethereum: chosen,
+      hasMultiple: multi,
+      isReadOnly: readOnly && typeof chosen === "undefined"
+    };
+  }
+
   // ─────────────────────────────────────────────
   //  Provider / Detecção
   // ─────────────────────────────────────────────
@@ -29,7 +61,8 @@ const Web3Client = (() => {
    * @returns {boolean}
    */
   function isMetaMaskAvailable() {
-    return typeof window.ethereum !== "undefined";
+    const { ethereum } = _resolveEthereum();
+    return typeof ethereum !== "undefined";
   }
 
   /**
@@ -38,11 +71,18 @@ const Web3Client = (() => {
    * @throws Se MetaMask não estiver instalado.
    */
   function getProviderFromMetaMask() {
-    if (!isMetaMaskAvailable()) {
+    const resolved = _resolveEthereum();
+    _providerDiagnostics = {
+      collision: resolved.hasMultiple,
+      readOnlySlot: resolved.isReadOnly,
+      available: typeof resolved.ethereum !== "undefined"
+    };
+
+    if (!resolved.ethereum) {
       throw new Error("MetaMask não encontrado. Instale a extensão para continuar.");
     }
     if (!_provider) {
-      _provider = new ethers.BrowserProvider(window.ethereum);
+      _provider = new ethers.BrowserProvider(resolved.ethereum);
     }
     return _provider;
   }
@@ -56,7 +96,11 @@ const Web3Client = (() => {
    */
   function getReadContract(abi, address) {
     // Fresh BrowserProvider every call — avoids MetaMask eth_call cache
-    const fresh = new ethers.BrowserProvider(window.ethereum);
+    const { ethereum } = _resolveEthereum();
+    if (!ethereum) {
+      throw new Error("MetaMask não encontrado para leitura do contrato.");
+    }
+    const fresh = new ethers.BrowserProvider(ethereum);
     return new ethers.Contract(address, abi, fresh);
   }
 
@@ -70,25 +114,40 @@ const Web3Client = (() => {
    * @returns {Promise<{address: string, chainId: string}>}
    */
   async function connectWallet() {
-    if (!isMetaMaskAvailable()) {
+    const resolved = _resolveEthereum();
+    if (!resolved.ethereum) {
       throw new Error("MetaMask não encontrado. Instale a extensão para continuar.");
     }
+    _providerDiagnostics = {
+      collision: resolved.hasMultiple,
+      readOnlySlot: resolved.isReadOnly,
+      available: true
+    };
 
     // Usa wallet_requestPermissions para forçar o popup de seleção de conta
     // (eth_requestAccounts retorna a conta em cache sem mostrar o picker)
-    await window.ethereum.request({
-      method: "wallet_requestPermissions",
-      params: [{ eth_accounts: {} }]
-    });
+    try {
+      await resolved.ethereum.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }]
+      });
+    } catch (permErr) {
+      // Alguns provedores não suportam wallet_requestPermissions
+      if (permErr?.code === -32601 || /wallet_requestPermissions/i.test(permErr?.message || "")) {
+        await resolved.ethereum.request({ method: "eth_requestAccounts" });
+      } else {
+        throw permErr;
+      }
+    }
 
-    const accounts = await window.ethereum.request({ method: "eth_accounts" });
+    const accounts = await resolved.ethereum.request({ method: "eth_accounts" });
 
     if (!accounts || accounts.length === 0) {
-      throw new Error("Nenhuma conta autorizada pelo MetaMask.");
+      throw new Error("Nenhuma conta autorizada pelo MetaMask. Importe ou crie uma conta e tente novamente.");
     }
 
     // Recria o provider APÓS a autorização para garantir estado limpo
-    _provider = new ethers.BrowserProvider(window.ethereum);
+    _provider = new ethers.BrowserProvider(resolved.ethereum);
 
     _signer = await _provider.getSigner();
     _address = await _signer.getAddress();
@@ -116,7 +175,11 @@ const Web3Client = (() => {
     if (!addr) throw new Error("Nenhum endereço conectado.");
 
     // Usa MetaMask como proxy RPC
-    const hexBalance = await window.ethereum.request({
+    const resolved = _resolveEthereum();
+    if (!resolved.ethereum) {
+      throw new Error("MetaMask não encontrado.");
+    }
+    const hexBalance = await resolved.ethereum.request({
       method: "eth_getBalance",
       params: [addr, "latest"]
     });
@@ -173,11 +236,12 @@ const Web3Client = (() => {
     if (!address) {
       throw new Error("Endereço inválido para troca de conta.");
     }
-    if (!isMetaMaskAvailable()) {
+    const resolved = _resolveEthereum();
+    if (!resolved.ethereum) {
       throw new Error("MetaMask não encontrado.");
     }
     if (!_provider) {
-      _provider = new ethers.BrowserProvider(window.ethereum);
+      _provider = new ethers.BrowserProvider(resolved.ethereum);
     }
     _signer = await _provider.getSigner(address);
     _address = await _signer.getAddress();
@@ -212,7 +276,11 @@ const Web3Client = (() => {
     // Obtém gasPrice via RPC legado (via MetaMask)
     let gasPrice;
     try {
-      const hexPrice = await window.ethereum.request({ method: "eth_gasPrice" });
+      const resolved = _resolveEthereum();
+      if (!resolved.ethereum) {
+        throw new Error("MetaMask não encontrado.");
+      }
+      const hexPrice = await resolved.ethereum.request({ method: "eth_gasPrice" });
       gasPrice = BigInt(hexPrice);
     } catch (_) {
       // Fallback: preço padrão (20 gwei)
@@ -235,9 +303,10 @@ const Web3Client = (() => {
    * @param {Function} onChainChanged
    */
   function listenMetaMaskEvents(onAccountsChanged, onChainChanged) {
-    if (!isMetaMaskAvailable()) return;
+    const resolved = _resolveEthereum();
+    if (!resolved.ethereum) return;
 
-    window.ethereum.on("accountsChanged", (accounts) => {
+    resolved.ethereum.on("accountsChanged", (accounts) => {
       if (accounts.length === 0) {
         // Desconectou
         _signer = null;
@@ -248,7 +317,7 @@ const Web3Client = (() => {
       if (onAccountsChanged) onAccountsChanged(accounts);
     });
 
-    window.ethereum.on("chainChanged", (chainIdHex) => {
+    resolved.ethereum.on("chainChanged", (chainIdHex) => {
       // Reseta provider para pegar nova rede
       _provider = null;
       _signer = null;
@@ -293,6 +362,7 @@ const Web3Client = (() => {
     _signer = null;
     _address = null;
     _chainId = null;
+    _providerDiagnostics = null;
   }
 
   // ── API pública ──
@@ -310,6 +380,7 @@ const Web3Client = (() => {
     estimateTxCost,
     listenMetaMaskEvents,
     parseError,
+    getProviderDiagnostics: () => _providerDiagnostics,
     reset
   };
 
