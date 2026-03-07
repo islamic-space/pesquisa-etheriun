@@ -61,6 +61,15 @@ let isRegistered = false;
 /** @type {boolean} Indica se o usuário atual é sheik */
 let isSheik = false;
 
+/** @type {boolean} Indica se o usuário atual é o SuperAdmin da V2 (userId 1) */
+let isSuperAdmin = false;
+
+/** @type {boolean} Permissão efetiva para atestar muçulmano */
+let canAttestMuslim = false;
+
+/** @type {boolean} Permissão efetiva para promover sheik */
+let canPromoteToSheik = false;
+
 /**
  * Nomes dos tipos de credencial (espelhando o enum do contrato).
  */
@@ -228,46 +237,82 @@ function setOnchainButtonsEnabled(enabled) {
  *  - Atestar / Promover: habilitada apenas para sheiks
  */
 async function refreshTabAccess() {
+  const allTabs = document.querySelectorAll('nav.tabs button');
   const tabRegister = document.querySelector('nav.tabs button[data-tab="tabRegister"]');
+  const tabDashboard = document.querySelector('nav.tabs button[data-tab="tabDashboard"]');
+  const tabSheikhs = document.querySelector('nav.tabs button[data-tab="tabSheikhs"]');
   const tabAttest   = document.querySelector('nav.tabs button[data-tab="tabAttest"]');
+  const tabRequest  = document.querySelector('nav.tabs button[data-tab="tabRequest"]');
+  const formAttestButton = document.querySelector('#formAttest button[type="submit"]');
+  const formPromoteButton = document.querySelector('#formPromote button[type="submit"]');
+  const attestRulesHint = document.getElementById("attestRulesHint");
+  const promoteRulesHint = document.getElementById("promoteRulesHint");
+  const disconnectedState = document.getElementById("disconnectedState");
 
   // Estado padrão: tudo habilitado (reset)
   isRegistered = false;
   isSheik = false;
+  isSuperAdmin = false;
+  canAttestMuslim = false;
+  canPromoteToSheik = false;
 
-  if (!currentAccount || !contractAddress || !contract) {
-    // Sem contrato — mantém abas habilitadas (formulários já exigem contrato)
-    tabRegister.disabled = false;
-    tabRegister.classList.remove("tab-disabled");
-    tabRegister.title = "";
-    tabAttest.disabled = false;
-    tabAttest.classList.remove("tab-disabled");
-    tabAttest.title = "";
+  if (!currentAccount) {
+    if (disconnectedState) disconnectedState.classList.remove("hidden");
+    allTabs.forEach((tab) => {
+      tab.disabled = true;
+      tab.classList.add("tab-disabled");
+      tab.title = "Conecte a carteira para acessar";
+    });
+    if (formAttestButton) formAttestButton.disabled = false;
+    if (formPromoteButton) formPromoteButton.disabled = false;
+    if (attestRulesHint) attestRulesHint.textContent = "Disponível apenas para sheiks com certificado ativo.";
+    if (promoteRulesHint) promoteRulesHint.textContent = "O primeiro sheik pode ser nomeado pelo SuperAdmin. Depois disso, apenas sheiks com certificado ativo podem promover novos sheiks, e o candidato deve possuir atestado de muçulmano.";
+
+    if (!document.querySelector('nav.tabs button.active') || document.querySelector('nav.tabs button.active')?.disabled) {
+      allTabs.forEach((tab) => tab.classList.remove("active"));
+      document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
+      tabRegister.classList.add("active");
+      document.getElementById("tabRegister").classList.add("active");
+    }
+    return;
+  }
+
+  if (disconnectedState) disconnectedState.classList.add("hidden");
+
+  allTabs.forEach((tab) => {
+    tab.disabled = false;
+    tab.classList.remove("tab-disabled");
+    tab.title = "";
+  });
+
+  if (!contractAddress || !contract) {
     return;
   }
 
   try {
     const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+    let currentUserId = 0;
 
-    // Verifica registro
     try {
       const profile = await rc.getProfile(currentAccount);
-      isRegistered = !!profile[5]; // profile[5] = exists
+      isRegistered = !!profile[5];
+      currentUserId = Number(profile[0] || 0);
+      isSuperAdmin = isRegistered && currentUserId === 1;
     } catch (_) {}
 
-    // Verifica sheik
     try {
       isSheik = await rc.isSheikh(currentAccount);
     } catch (_) {}
 
-    console.log(`[refreshTabAccess] isRegistered: ${isRegistered}, isSheik: ${isSheik}`);
+    canAttestMuslim = isSheik;
+    canPromoteToSheik = isSheik || isSuperAdmin;
 
-    // ── Aba Registro ──
+    console.log(`[refreshTabAccess] isRegistered: ${isRegistered}, isSheik: ${isSheik}, isSuperAdmin: ${isSuperAdmin}, canPromoteToSheik: ${canPromoteToSheik}`);
+
     if (isRegistered) {
       tabRegister.disabled = true;
       tabRegister.classList.add("tab-disabled");
       tabRegister.title = "Você já possui cadastro on-chain";
-      // Se a aba ativa era Registro, redireciona para Meu Painel
       if (tabRegister.classList.contains("active")) {
         switchTab("tabDashboard");
       }
@@ -277,12 +322,10 @@ async function refreshTabAccess() {
       tabRegister.title = "";
     }
 
-    // ── Aba Atestar / Promover ──
-    if (!isSheik) {
+    if (!canAttestMuslim && !canPromoteToSheik) {
       tabAttest.disabled = true;
       tabAttest.classList.add("tab-disabled");
-      tabAttest.title = "Disponível apenas para Sheiks";
-      // Se a aba ativa era Atestar, redireciona
+      tabAttest.title = "Disponível apenas para sheiks ativos ou SuperAdmin da V2";
       if (tabAttest.classList.contains("active")) {
         switchTab("tabDashboard");
       }
@@ -291,6 +334,36 @@ async function refreshTabAccess() {
       tabAttest.classList.remove("tab-disabled");
       tabAttest.title = "";
     }
+
+    if (formAttestButton) {
+      formAttestButton.disabled = !canAttestMuslim;
+      formAttestButton.classList.toggle("btn-disabled", !canAttestMuslim);
+    }
+    if (formPromoteButton) {
+      formPromoteButton.disabled = !canPromoteToSheik;
+      formPromoteButton.classList.toggle("btn-disabled", !canPromoteToSheik);
+    }
+    if (attestRulesHint) {
+      attestRulesHint.textContent = canAttestMuslim
+        ? "Você pode emitir atestado de muçulmano nesta carteira."
+        : "Disponível apenas para sheiks com certificado ativo.";
+    }
+    if (promoteRulesHint) {
+      if (isSuperAdmin && !isSheik) {
+        promoteRulesHint.textContent = "Como SuperAdmin, você pode nomear o primeiro sheik. O contrato emitirá o atestado de muçulmano do candidato se ele ainda não existir.";
+      } else if (canPromoteToSheik) {
+        promoteRulesHint.textContent = "Você pode promover novos sheiks. O candidato precisa possuir atestado de muçulmano ativo.";
+      } else {
+        promoteRulesHint.textContent = "O primeiro sheik pode ser nomeado pelo SuperAdmin. Depois disso, apenas sheiks com certificado ativo podem promover novos sheiks, e o candidato deve possuir atestado de muçulmano.";
+      }
+    }
+
+    tabDashboard.disabled = false;
+    tabDashboard.classList.remove("tab-disabled");
+    tabSheikhs.disabled = false;
+    tabSheikhs.classList.remove("tab-disabled");
+    tabRequest.disabled = false;
+    tabRequest.classList.remove("tab-disabled");
 
   } catch (err) {
     console.warn("[refreshTabAccess] Erro ao verificar status:", err.message);
@@ -1325,14 +1398,31 @@ async function refreshDashboard(_retries = 0) {
     }
 
     // UserId
-    document.getElementById("dashUserId").textContent = profile[0].toString();
+    const currentUserId = Number(profile[0]);
+    document.getElementById("dashUserId").textContent = currentUserId.toString();
 
-    // Sheik badge
+    document.getElementById("dashSuperAdminBadge").classList.toggle("hidden", currentUserId !== 1);
+
     try {
       const sheik = await rcRead.isSheikh(currentAccount);
       document.getElementById("dashSheikBadge").classList.toggle("hidden", !sheik);
     } catch (_) {
       document.getElementById("dashSheikBadge").classList.add("hidden");
+    }
+
+    const roleHint = document.getElementById("dashRoleHint");
+    if (currentUserId === 1 && !isSheik) {
+      roleHint.textContent = "Esta carteira é o SuperAdmin da V2 e pode nomear o primeiro sheik.";
+      roleHint.classList.remove("hidden");
+    } else if (currentUserId === 1 && isSheik) {
+      roleHint.textContent = "Esta carteira é o SuperAdmin e também possui certificado ativo de sheik.";
+      roleHint.classList.remove("hidden");
+    } else if (isSheik) {
+      roleHint.textContent = "Esta carteira possui certificado ativo de sheik.";
+      roleHint.classList.remove("hidden");
+    } else {
+      roleHint.textContent = "";
+      roleHint.classList.add("hidden");
     }
 
     // Credenciais
@@ -1450,6 +1540,7 @@ async function refreshSheikhs() {
 async function handleAttest(e) {
   e.preventDefault();
   if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
+  if (!canAttestMuslim) { showStatus("Apenas sheiks com certificado ativo podem atestar muçulmanos neste contrato.", "warning"); return; }
 
   const subject = document.getElementById("attestSubject").value.trim();
   const uri = document.getElementById("attestUri").value.trim();
@@ -1516,6 +1607,7 @@ async function handleAttest(e) {
 async function handlePromote(e) {
   e.preventDefault();
   if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
+  if (!canPromoteToSheik) { showStatus("Somente sheiks ativos ou o SuperAdmin da V2 podem promover sheiks.", "warning"); return; }
 
   const subject = document.getElementById("promoteSubject").value.trim();
   const uri = document.getElementById("promoteUri").value.trim();
@@ -1731,9 +1823,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Estado inicial: desabilitar botões on-chain ──
   setOnchainButtonsEnabled(false);
+  refreshTabAccess();
 
   // ── Conectar carteira ──
   document.getElementById("btnConnect").addEventListener("click", connectWallet);
+  document.getElementById("btnConnectCenter").addEventListener("click", connectWallet);
 
   // ── Desconectar carteira ──
   document.getElementById("btnDisconnect").addEventListener("click", disconnectWallet);

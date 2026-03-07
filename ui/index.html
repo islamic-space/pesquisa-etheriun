@@ -122,6 +122,14 @@
     <!-- ── Mensagem de status fixa ── -->
     <div id="statusMsg" class="hidden"></div>
 
+    <section id="disconnectedState" class="disconnected-state">
+      <div class="disconnected-card">
+        <h2>Conecte sua carteira</h2>
+        <p>Para acessar as abas e interagir com o contrato IslamicPassport, conecte sua carteira MetaMask.</p>
+        <button id="btnConnectCenter" class="btn btn-primary disconnected-connect-btn">Conectar MetaMask</button>
+      </div>
+    </section>
+
     <!-- ══════════════════════════════════════ TAB: Registro ══════════════════════════════════════ -->
     <section id="tabRegister" class="tab-panel active">
       <div class="card">
@@ -173,8 +181,12 @@
           </div>
           <div class="flex-gap mb-2">
             <div><strong>User ID:</strong> <span id="dashUserId">—</span></div>
-            <div id="dashSheikBadge" class="hidden"><span class="badge badge-sheik">SHEIK</span></div>
+            <div id="dashRoleBadges" class="flex-gap">
+              <div id="dashSuperAdminBadge" class="hidden"><span class="badge badge-superadmin">SUPERADMIN</span></div>
+              <div id="dashSheikBadge" class="hidden"><span class="badge badge-sheik">SHEIK</span></div>
+            </div>
           </div>
+          <div id="dashRoleHint" class="hidden" style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:0.8rem;"></div>
 
           <h3>Credenciais</h3>
           <div id="dashCredentials">
@@ -208,7 +220,10 @@
     <section id="tabAttest" class="tab-panel">
       <!-- Atesto -->
       <div class="card">
-        <h2>Atestar Muçulmano (somente Sheik)</h2>
+        <h2>Atestar Muçulmano</h2>
+        <p id="attestRulesHint" class="mb-2" style="font-size:0.82rem;color:var(--text-secondary);">
+          Disponível apenas para sheiks com certificado ativo.
+        </p>
         <form id="formAttest" autocomplete="off">
           <div class="form-group">
             <label>Endereço do muçulmano (subject)</label>
@@ -224,7 +239,10 @@
 
       <!-- Promoção -->
       <div class="card">
-        <h2>Promover a Sheik (somente Sheik)</h2>
+        <h2>Promover a Sheik</h2>
+        <p id="promoteRulesHint" class="mb-2" style="font-size:0.82rem;color:var(--text-secondary);">
+          O primeiro sheik pode ser nomeado pelo SuperAdmin. Depois disso, apenas sheiks com certificado ativo podem promover novos sheiks, e o candidato deve possuir atestado de muçulmano.
+        </p>
         <form id="formPromote" autocomplete="off">
           <div class="form-group">
             <label>Endereço do novo sheik (subject)</label>
