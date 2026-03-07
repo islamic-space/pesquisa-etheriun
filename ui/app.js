@@ -27,6 +27,8 @@ const CONTRACT_ABI = [
   "function totalCredentials() view returns (uint256)",
   "function totalUsers() view returns (uint256)",
   "function deployChainId() view returns (uint256)",
+  "function identifyContract() view returns (string)",
+  "function getAvailableAttestationTypes() view returns ((uint8 id, string key, string label, string description)[])",
 
   // ── Eventos ──
   "event ProfileRegistered(address indexed user, uint256 indexed userId, bytes32 hNomeOficial, bytes32 hNomeMuculmano, bytes32 hMesquita, string uri)",
@@ -54,6 +56,18 @@ let contractAddress = null;
 
 /** @type {string[]} Lista de endereços de contratos registrados */
 let contractList = [];
+
+/** @type {object|null} Metadados do contrato ativo */
+let contractMetadata = null;
+
+const MAX_AUTO_SCAN_BLOCKS = 10000;
+const contractScanModalState = {
+  isOpen: false,
+  running: false,
+  foundAddress: null,
+  foundBlock: null,
+  reason: ""
+};
 
 /** @type {boolean} Indica se o usuário atual já está registrado on-chain */
 let isRegistered = false;
@@ -87,54 +101,518 @@ const ONCHAIN_BUTTONS_SELECTOR = [
   '#btnRefreshSheikhs'
 ].join(",");
 
-const ATTESTATION_TYPE_CONFIG = {
-  MUSLIM_ATTESTATION: {
-    label: "Atestado de Muçulmano",
-    vcType: "MuslimAttestation",
-    contractMethod: "attestMuslim",
-    permissionCheck: () => canAttestMuslim,
-    permissionMessage: "Apenas sheiks com certificado ativo podem emitir atestados de muçulmano neste contrato.",
-    successMessage: "Atestado de muçulmano emitido com sucesso!",
-    hint: "Requer certificado ativo de sheik e confirma a fé do solicitante.",
-    buildClaims: () => ({ attestedBy: currentAccount })
-  },
-  SHEIK_CERTIFICATE: {
-    label: "Certificado de Sheik",
-    vcType: "SheikhCertificate",
-    contractMethod: "promoteToSheikh",
-    permissionCheck: () => canPromoteToSheik,
-    permissionMessage: "Somente sheiks ativos ou o SuperAdmin da V2 podem promover novos sheiks.",
-    successMessage: "Promoção a sheik realizada com sucesso!",
-    hint: "Disponível para sheiks ativos ou SuperAdmin e concede certificado de liderança.",
-    buildClaims: () => ({ promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" })
-  }
+/**
+ * Catálogo dinâmico de tipos de credencial retornados pelo contrato.
+ * Estrutura por chave (ex.: MUSLIM_ATTESTATION).
+ */
+const attestationTypeCatalog = new Map();
+
+/** Marca quais recursos opcionais o contrato suporta. */
+const contractCapabilities = {
+  identifyContract: true,
+  attestationCatalog: true
 };
 
-const DEFAULT_ATTESTATION_TYPE = "MUSLIM_ATTESTATION";
+/** Ordem padrão caso chamada ao contrato falhe. */
+const FALLBACK_ATTESTATION_TYPES = [
+  {
+    key: "INITIAL",
+    label: "Registro Inicial",
+    description: "Credencial automática emitida ao registrar o perfil no Islamic Passport.",
+    contractMethod: "registerProfile",
+    vcType: "InitialCredential",
+    successMessage: "Registro inicial confirmado!",
+    buildClaims: () => ({ issuedBy: contractAddress || "0x" })
+  },
+  {
+    key: "MUSLIM_ATTESTATION",
+    label: "Atestado de Muçulmano",
+    description: "Certifica que o sujeito possui fé muçulmana reconhecida por um sheik.",
+    contractMethod: "attestMuslim",
+    vcType: "MuslimAttestation",
+    successMessage: "Atestado de muçulmano emitido com sucesso!",
+    buildClaims: () => ({ attestedBy: currentAccount })
+  },
+  {
+    key: "SHEIK_CERTIFICATE",
+    label: "Certificado de Sheik",
+    description: "Concede autoridade para emitir atestos e promover novos sheiks.",
+    contractMethod: "promoteToSheikh",
+    vcType: "SheikhCertificate",
+    successMessage: "Promoção a sheik realizada com sucesso!",
+    buildClaims: () => ({ promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" })
+  }
+];
+
+// ═══════════════════════════════════════════════════════════
+//  Modal automático de varredura de contratos
+// ═══════════════════════════════════════════════════════════
+
+function maybePromptContractScan(reason = "Nenhum contrato informado nesta rede. Vamos buscar automaticamente?") {
+  if (!Web3Client.isMetaMaskAvailable()) return;
+  if (contractScanModalState.isOpen || contractScanModalState.running) return;
+  if (contractAddress) return;
+  if (contractList.length > 0) return;
+  if (!currentAccount) return;
+  showContractScanModal(reason);
+  runContractScanModal();
+}
+
+function showContractScanModal(reason) {
+  const modal = document.getElementById("contractScanModal");
+  if (!modal) return;
+  contractScanModalState.isOpen = true;
+  contractScanModalState.running = false;
+  contractScanModalState.foundAddress = null;
+  contractScanModalState.foundBlock = null;
+  contractScanModalState.reason = reason;
+
+  const reasonEl = document.getElementById("contractScanReason");
+  if (reasonEl) reasonEl.textContent = reason;
+
+  updateContractScanStatus(`Preparando varredura (até ${MAX_AUTO_SCAN_BLOCKS.toLocaleString("pt-BR")} blocos)…`);
+
+  const logEl = document.getElementById("contractScanLog");
+  if (logEl) logEl.innerHTML = "";
+
+  const resultEl = document.getElementById("contractScanResult");
+  if (resultEl) resultEl.classList.add("hidden");
+
+  const manualInput = document.getElementById("contractScanManualInput");
+  if (manualInput) manualInput.value = "";
+
+  updateContractScanAcceptState();
+  modal.classList.remove("hidden");
+}
+
+function hideContractScanModal() {
+  const modal = document.getElementById("contractScanModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  contractScanModalState.isOpen = false;
+}
+
+function updateContractScanStatus(text) {
+  const statusEl = document.getElementById("contractScanStatus");
+  if (!statusEl) return;
+  statusEl.textContent = text;
+}
+
+function appendContractScanLog(text) {
+  const logEl = document.getElementById("contractScanLog");
+  if (!logEl) return;
+  const row = document.createElement("div");
+  row.textContent = text;
+  logEl.appendChild(row);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setContractScanResult(address, blockNumber) {
+  const resultEl = document.getElementById("contractScanResult");
+  const addrEl = document.getElementById("contractScanAddress");
+  const blockEl = document.getElementById("contractScanBlock");
+  if (!resultEl || !addrEl || !blockEl) return;
+  if (!address) {
+    resultEl.classList.add("hidden");
+    return;
+  }
+  addrEl.textContent = address;
+  blockEl.textContent = blockNumber != null ? blockNumber.toString() : "manual";
+  resultEl.classList.remove("hidden");
+}
+
+function getManualOverrideAddress() {
+  const manualInput = document.getElementById("contractScanManualInput");
+  if (!manualInput) return null;
+  const candidate = manualInput.value.trim();
+  if (!candidate) return null;
+  try {
+    return ethers.getAddress(candidate);
+  } catch (_) {
+    return null;
+  }
+}
+
+function updateContractScanAcceptState() {
+  const btn = document.getElementById("contractScanAccept");
+  if (!btn) return;
+  const manualAddr = getManualOverrideAddress();
+  btn.disabled = !manualAddr && !contractScanModalState.foundAddress;
+}
+
+function handleContractScanManualInput() {
+  if (!contractScanModalState.isOpen) return;
+  const manualAddr = getManualOverrideAddress();
+  if (manualAddr) {
+    setContractScanResult(manualAddr, null);
+    updateContractScanStatus(`Endereço manual detectado: ${shortAddr(manualAddr)}.`);
+  } else if (!contractScanModalState.foundAddress) {
+    setContractScanResult(null, null);
+    if (!contractScanModalState.running) {
+      updateContractScanStatus(`Informe um endereço ou aguarde a varredura automática.`);
+    }
+  } else {
+    setContractScanResult(contractScanModalState.foundAddress, contractScanModalState.foundBlock);
+  }
+  updateContractScanAcceptState();
+}
+
+async function handleContractScanAccept() {
+  const manualAddr = getManualOverrideAddress();
+  const targetAddr = manualAddr || contractScanModalState.foundAddress;
+  if (!targetAddr) return;
+  hideContractScanModal();
+  await addContractAddress(targetAddr);
+}
+
+async function runContractScanModal() {
+  if (!contractScanModalState.isOpen) return;
+  if (contractScanModalState.running) return;
+  if (!Web3Client.isMetaMaskAvailable()) {
+    updateContractScanStatus("MetaMask não disponível para varredura.");
+    return;
+  }
+  contractScanModalState.running = true;
+  contractScanModalState.foundAddress = null;
+  contractScanModalState.foundBlock = null;
+  setContractScanResult(null, null);
+  updateContractScanStatus(`Escaneando últimos ${MAX_AUTO_SCAN_BLOCKS.toLocaleString("pt-BR")} blocos…`);
+  appendContractScanLog("Iniciando busca do bloco mais recente.");
+
+  try {
+    const result = await scanLatestIslamicPassportContract({
+      maxBlocks: MAX_AUTO_SCAN_BLOCKS,
+      onProgress: (info) => {
+        if (info.type === "block") {
+          updateContractScanStatus(`Bloco ${info.blockNumber} · limite ${info.minBlock}`);
+          if (
+            info.blockNumber === info.latestBlock ||
+            info.blockNumber === info.minBlock ||
+            info.blockNumber % 200 === 0
+          ) {
+            appendContractScanLog(`Bloco ${info.blockNumber} verificado.`);
+          }
+        } else if (info.type === "candidate") {
+          appendContractScanLog(`Verificando contrato ${shortAddr(info.address)} no bloco ${info.blockNumber}…`);
+        }
+      }
+    });
+
+    if (result && result.address) {
+      contractScanModalState.foundAddress = result.address;
+      contractScanModalState.foundBlock = result.blockNumber;
+      setContractScanResult(result.address, result.blockNumber);
+      updateContractScanStatus(`Contrato encontrado no bloco ${result.blockNumber}.`);
+      appendContractScanLog(`✅ IslamicPassport detectado em ${result.address}.`);
+    } else {
+      updateContractScanStatus("Nenhum contrato IslamicPassport encontrado no intervalo analisado.");
+      appendContractScanLog("⚠️ Nenhum contrato identificado. Informe manualmente ou busque novamente.");
+    }
+  } catch (err) {
+    console.error("[runContractScanModal]", err);
+    updateContractScanStatus(`Erro ao buscar contratos: ${err.message || err}`);
+    appendContractScanLog("Erro interrompeu a varredura. Tente novamente.");
+  } finally {
+    contractScanModalState.running = false;
+    updateContractScanAcceptState();
+  }
+}
+
+async function scanLatestIslamicPassportContract({ maxBlocks, onProgress }) {
+  if (!window.ethereum) {
+    throw new Error("window.ethereum não disponível");
+  }
+  const latestHex = await window.ethereum.request({ method: "eth_blockNumber" });
+  const latestBlock = parseInt(latestHex, 16);
+  if (!Number.isFinite(latestBlock)) {
+    throw new Error("Não foi possível obter o número do bloco mais recente.");
+  }
+  const minBlock = Math.max(latestBlock - maxBlocks + 1, 0);
+
+  for (let blockNumber = latestBlock; blockNumber >= minBlock; blockNumber--) {
+    onProgress?.({ type: "block", blockNumber, latestBlock, minBlock });
+    const block = await window.ethereum.request({
+      method: "eth_getBlockByNumber",
+      params: ["0x" + blockNumber.toString(16), true]
+    });
+    if (!block || !block.transactions || block.transactions.length === 0) continue;
+
+    for (const tx of block.transactions) {
+      if (tx.to && tx.to !== "0x" && tx.to !== "0x0000000000000000000000000000000000000000") continue;
+      const receipt = await window.ethereum.request({
+        method: "eth_getTransactionReceipt",
+        params: [tx.hash]
+      });
+      if (!receipt || !receipt.contractAddress) continue;
+      const addr = ethers.getAddress(receipt.contractAddress);
+      onProgress?.({ type: "candidate", blockNumber, address: addr });
+      const isIslamicPassport = await _isIslamicPassportContract(addr);
+      if (isIslamicPassport) {
+        return { address: addr, blockNumber };
+      }
+    }
+  }
+
+  return { address: null, blockNumber: null };
+}
+
+FALLBACK_ATTESTATION_TYPES.forEach((item) => attestationTypeCatalog.set(item.key, item));
+
+let defaultAttestationType = "MUSLIM_ATTESTATION";
 
 /** @type {{address: string, did: string}[]} */
 let sheikhDirectory = [];
 
+// ═══════════════════════════════════════════════════════════
+//  Metadados do contrato (identifyContract)
+// ═══════════════════════════════════════════════════════════
+
+function updateContractMetadataUI() {
+  const nameEl = document.getElementById("contractMetaName");
+  const versionEl = document.getElementById("contractMetaVersion");
+  const pillEl = document.getElementById("contractMetaPill");
+  const infoBtn = document.getElementById("contractInfoButton");
+  if (!nameEl || !versionEl || !infoBtn) return;
+
+  if (contractMetadata && contractMetadata.address && (!contractAddress || contractMetadata.address.toLowerCase() === contractAddress.toLowerCase())) {
+    nameEl.textContent = contractMetadata.name || "IslamicPassport";
+    versionEl.textContent = contractMetadata.version ? `v${contractMetadata.version}` : "";
+    infoBtn.disabled = false;
+    pillEl?.classList.remove("contract-meta-pill--empty");
+  } else if (contractAddress) {
+    nameEl.textContent = `Contrato ativo: ${shortAddr(contractAddress)}`;
+    versionEl.textContent = "carregando metadados…";
+    infoBtn.disabled = true;
+    pillEl?.classList.add("contract-meta-pill--empty");
+  } else {
+    nameEl.textContent = "Contrato não configurado";
+    versionEl.textContent = "—";
+    infoBtn.disabled = true;
+    pillEl?.classList.add("contract-meta-pill--empty");
+  }
+}
+
+function resetContractMetadata() {
+  contractMetadata = null;
+  updateContractMetadataUI();
+}
+
+function resetContractCapabilities() {
+  contractCapabilities.identifyContract = true;
+  contractCapabilities.attestationCatalog = true;
+}
+
+function applyLegacyContractMetadataFallback(message) {
+  if (message) {
+    console.warn(message);
+  }
+  contractMetadata = {
+    name: "IslamicPassport (Legacy)",
+    version: "",
+    deployDate: "—",
+    deployTimestamp: null,
+    deployChainId: currentChainId || "—",
+    authors: [],
+    address: contractAddress,
+    isLegacy: true
+  };
+  updateContractMetadataUI();
+}
+
+function isMissingFunctionError(err) {
+  if (!err) return false;
+  const noData = !err.data || err.data === "0x";
+  if (err.code === "CALL_EXCEPTION" && noData) return true;
+  if ((err.code === 3 || err.code === -32603) && noData) return true;
+  const msg = typeof err.message === "string" ? err.message.toLowerCase() : "";
+  return msg.includes("execution reverted") && noData;
+}
+
+function normalizeContractFeatures(features) {
+  if (!features) return {};
+  if (typeof features === "string") {
+    try { return JSON.parse(features); } catch (_) { return {}; }
+  }
+  if (typeof features === "object") return features;
+  return {};
+}
+
+function normalizeContractAuthors(authors) {
+  if (!authors) return [];
+  if (Array.isArray(authors)) return authors;
+  if (typeof authors === "string") {
+    try {
+      const parsed = JSON.parse(authors);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  return [];
+}
+
+async function refreshContractMetadata() {
+  if (!contractAddress) {
+    resetContractMetadata();
+    return;
+  }
+
+  if (!contractCapabilities.identifyContract) {
+    applyLegacyContractMetadataFallback();
+    return;
+  }
+
+  try {
+    const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+    const raw = await rc.identifyContract();
+    const parsed = _parseIdentifyContractPayload(raw);
+    if (!parsed) {
+      resetContractMetadata();
+      return;
+    }
+    contractMetadata = {
+      ...parsed,
+      features: normalizeContractFeatures(parsed.features),
+      authors: normalizeContractAuthors(parsed.authors),
+      address: contractAddress
+    };
+  } catch (err) {
+    if (isMissingFunctionError(err)) {
+      contractCapabilities.identifyContract = false;
+      applyLegacyContractMetadataFallback("[refreshContractMetadata] identifyContract indisponível neste contrato (modo legacy).");
+      return;
+    }
+    console.warn("[refreshContractMetadata] identifyContract falhou:", err.message);
+    resetContractMetadata();
+    return;
+  }
+
+  updateContractMetadataUI();
+}
+
+function openContractInfoModal() {
+  if (!contractMetadata) return;
+  renderContractInfoModal(contractMetadata);
+  const modal = document.getElementById("contractInfoModal");
+  modal?.classList.remove("hidden");
+}
+
+function closeContractInfoModal() {
+  const modal = document.getElementById("contractInfoModal");
+  modal?.classList.add("hidden");
+}
+
+function renderContractInfoModal(meta) {
+  if (!meta) return;
+  const addressFull = meta.address || contractAddress;
+  const addressEl = document.getElementById("contractInfoAddress");
+  const inlineAddrEl = document.getElementById("contractInfoAddressInline");
+  const nameEl = document.getElementById("contractInfoName");
+  const versionEl = document.getElementById("contractInfoVersion");
+  const dateEl = document.getElementById("contractInfoDate");
+  const timestampEl = document.getElementById("contractInfoTimestamp");
+  const chainEl = document.getElementById("contractInfoChain");
+
+  if (addressEl) {
+    addressEl.textContent = addressFull ? `Contrato ativo: ${addressFull}` : "Nenhum contrato ativo.";
+  }
+  if (inlineAddrEl) {
+    inlineAddrEl.textContent = addressFull || "—";
+  }
+  if (nameEl) nameEl.textContent = meta.name || "IslamicPassport";
+  if (versionEl) versionEl.textContent = meta.version ? `v${meta.version}` : "";
+  if (dateEl) dateEl.textContent = meta.deployDate || "—";
+  if (timestampEl) timestampEl.textContent = formatDeployTimestamp(meta.deployTimestamp);
+  if (chainEl) chainEl.textContent = meta.deployChainId || "—";
+
+  renderContractAuthorsList(document.getElementById("contractInfoAuthors"), meta.authors);
+  renderFeatureChips(document.getElementById("contractInfoFeatures"), meta.features);
+}
+
+function renderContractAuthorsList(listEl, authors) {
+  if (!listEl) return;
+  listEl.innerHTML = "";
+  const normalized = normalizeContractAuthors(authors);
+  if (normalized.length === 0) {
+    const empty = document.createElement("li");
+    empty.textContent = "—";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  normalized.forEach((author) => {
+    const li = document.createElement("li");
+    const parts = [];
+    if (author.name) parts.push(author.name);
+    if (author.email) parts.push(author.email);
+    if (author.eth) {
+      try {
+        parts.push(shortAddr(author.eth));
+      } catch (_) {
+        parts.push(author.eth);
+      }
+    }
+    if (author.sol) parts.push(author.sol);
+    li.textContent = parts.length > 0 ? parts.join(" · ") : JSON.stringify(author);
+    listEl.appendChild(li);
+  });
+}
+
+function renderFeatureChips(container, features) {
+  if (!container) return;
+  container.innerHTML = "";
+  const normalized = normalizeContractFeatures(features);
+  const entries = Object.entries(normalized);
+  if (entries.length === 0) {
+    const chip = document.createElement("span");
+    chip.className = "feature-chip feature-chip-empty";
+    chip.textContent = "Sem dados";
+    container.appendChild(chip);
+    return;
+  }
+
+  entries.forEach(([key, value]) => {
+    const chip = document.createElement("span");
+    chip.className = `feature-chip ${value ? "feature-chip-on" : "feature-chip-off"}`;
+    chip.textContent = value ? `${key} ativo` : `${key} indisponível`;
+    container.appendChild(chip);
+  });
+}
+
 function getAttestationTypeLabel(type) {
-  const cfg = ATTESTATION_TYPE_CONFIG[type];
-  return cfg ? cfg.label : type;
+  const item = attestationTypeCatalog.get(type);
+  return item?.label || type;
 }
 
 function getFirstPermittedAttestationType() {
-  const entry = Object.entries(ATTESTATION_TYPE_CONFIG).find(([, cfg]) => cfg.permissionCheck());
-  return entry ? entry[0] : DEFAULT_ATTESTATION_TYPE;
+  const types = Array.from(attestationTypeCatalog.keys());
+  const preferred = types.find((key) => isTypePermitted(key));
+  return preferred || defaultAttestationType;
 }
 
 function populateAttestationTypeSelect(selectEl) {
   if (!selectEl) return;
   selectEl.innerHTML = "";
-  Object.entries(ATTESTATION_TYPE_CONFIG).forEach(([key, cfg]) => {
+  attestationTypeCatalog.forEach((meta, key) => {
     const opt = document.createElement("option");
     opt.value = key;
-    opt.textContent = cfg.label;
+    opt.textContent = meta.label;
     selectEl.appendChild(opt);
   });
-  selectEl.value = DEFAULT_ATTESTATION_TYPE;
+  if (selectEl.options.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = defaultAttestationType;
+    opt.textContent = getAttestationTypeLabel(defaultAttestationType);
+    selectEl.appendChild(opt);
+  }
+  selectEl.value = defaultAttestationType;
+}
+
+function refreshAttestationTypeSelects() {
+  const issueSelect = document.getElementById("issueType");
+  const requestSelect = document.getElementById("requestType");
+  populateAttestationTypeSelect(issueSelect);
+  populateAttestationTypeSelect(requestSelect);
 }
 
 function refreshIssueTypeAvailability() {
@@ -142,9 +620,7 @@ function refreshIssueTypeAvailability() {
   if (!select) return;
   let needsFallback = false;
   Array.from(select.options).forEach((option) => {
-    const cfg = ATTESTATION_TYPE_CONFIG[option.value];
-    if (!cfg) return;
-    const allowed = cfg.permissionCheck();
+    const allowed = isTypePermitted(option.value);
     option.disabled = !allowed;
     if (!allowed && select.value === option.value) {
       needsFallback = true;
@@ -160,12 +636,114 @@ function updateIssueRulesHint() {
   const hintEl = document.getElementById("issueRulesHint");
   if (!hintEl) return;
   const select = document.getElementById("issueType");
-  const cfg = select ? ATTESTATION_TYPE_CONFIG[select.value] : null;
-  if (!cfg) {
+  const key = select?.value;
+  const meta = attestationTypeCatalog.get(key);
+  if (!meta) {
     hintEl.textContent = "Selecione o tipo de credencial a ser emitida.";
     return;
   }
-  hintEl.textContent = cfg.permissionCheck() ? cfg.hint : cfg.permissionMessage;
+  hintEl.textContent = isTypePermitted(key)
+    ? (meta.description || "")
+    : "Você não possui permissão para emitir este tipo de credencial no momento.";
+}
+
+function isTypePermitted(key) {
+  if (key === "MUSLIM_ATTESTATION") return canAttestMuslim;
+  if (key === "SHEIK_CERTIFICATE") return canPromoteToSheik;
+  return true;
+}
+
+async function loadAttestationTypesFromContract() {
+  if (!contractAddress) return;
+
+  if (!contractCapabilities.attestationCatalog) {
+    attestationTypeCatalog.clear();
+    FALLBACK_ATTESTATION_TYPES.forEach((item) => attestationTypeCatalog.set(item.key, item));
+    defaultAttestationType = FALLBACK_ATTESTATION_TYPES[0].key;
+    refreshAttestationTypeSelects();
+    refreshIssueTypeAvailability();
+    return;
+  }
+
+  try {
+    const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+
+    const types = await rc.getAvailableAttestationTypes();
+    attestationTypeCatalog.clear();
+    types.forEach((item) => {
+      const key = item.key;
+      attestationTypeCatalog.set(key, {
+        id: Number(item.id),
+        key,
+        label: item.label,
+        description: item.description,
+        contractMethod: mapTypeToContractMethod(key),
+        vcType: mapTypeToVcType(key),
+        buildClaims: mapTypeToClaimBuilder(key)
+      });
+    });
+    if (types.length > 0) {
+      defaultAttestationType = types[0].key;
+    }
+  } catch (err) {
+    if (isMissingFunctionError(err)) {
+      contractCapabilities.attestationCatalog = false;
+      console.warn("[loadAttestationTypesFromContract] Contrato legacy sem catálogo on-chain. Usando fallback local.");
+    } else {
+      console.warn("[loadAttestationTypesFromContract] Falhou, usando fallback:", err.message);
+    }
+    attestationTypeCatalog.clear();
+    FALLBACK_ATTESTATION_TYPES.forEach((item) => attestationTypeCatalog.set(item.key, item));
+    defaultAttestationType = FALLBACK_ATTESTATION_TYPES[0].key;
+  }
+
+  refreshAttestationTypeSelects();
+  refreshIssueTypeAvailability();
+}
+
+
+
+function _parseIdentifyContractPayload(rawValue) {
+  if (!rawValue || typeof rawValue !== "string") return null;
+  try {
+    return JSON.parse(rawValue);
+  } catch (err) {
+    console.warn("[_parseIdentifyContractPayload] JSON inválido:", err.message);
+    return null;
+  }
+}
+
+function mapTypeToContractMethod(key) {
+  switch (key) {
+    case "MUSLIM_ATTESTATION":
+      return "attestMuslim";
+    case "SHEIK_CERTIFICATE":
+      return "promoteToSheikh";
+    default:
+      return "attestMuslim";
+  }
+}
+
+function mapTypeToVcType(key) {
+  switch (key) {
+    case "SHEIK_CERTIFICATE":
+      return "SheikhCertificate";
+    case "INITIAL":
+      return "IslamicPassportProfile";
+    default:
+      return "MuslimAttestation";
+  }
+}
+
+function mapTypeToClaimBuilder(key) {
+  switch (key) {
+    case "SHEIK_CERTIFICATE":
+      return () => ({ promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" });
+    case "MUSLIM_ATTESTATION":
+      return () => ({ attestedBy: currentAccount });
+    default:
+      return () => ({ issuedBy: currentAccount, attestationType: key });
+  }
 }
 
 function updateSheikhDirectoryList() {
@@ -261,6 +839,13 @@ function formatTs(ts) {
   return new Date(n * 1000).toLocaleString("pt-BR");
 }
 
+function formatDeployTimestamp(value) {
+  if (value == null) return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return String(value);
+  return new Date(n * 1000).toLocaleString("pt-BR");
+}
+
 /**
  * Gera um JSON canônico de VC (Verifiable Credential) simplificado.
  * @param {object} params
@@ -351,16 +936,16 @@ function normalizeAttestationTypeKey(value) {
   if (!str) return null;
   const trimmed = str.trim();
   if (!trimmed) return null;
-  if (ATTESTATION_TYPE_CONFIG[trimmed]) return trimmed;
+  if (attestationTypeCatalog.has(trimmed)) return trimmed;
   const upper = trimmed.toUpperCase();
-  if (ATTESTATION_TYPE_CONFIG[upper]) return upper;
-  const byLabel = Object.entries(ATTESTATION_TYPE_CONFIG).find(([, cfg]) => {
-    return (
-      cfg.label.toLowerCase() === trimmed.toLowerCase() ||
-      cfg.vcType.toLowerCase() === trimmed.toLowerCase()
-    );
-  });
-  return byLabel ? byLabel[0] : null;
+  if (attestationTypeCatalog.has(upper)) return upper;
+  const lowered = trimmed.toLowerCase();
+  for (const [key, meta] of attestationTypeCatalog.entries()) {
+    if (meta.label?.toLowerCase() === lowered || meta.vcType?.toLowerCase() === lowered) {
+      return key;
+    }
+  }
+  return null;
 }
 
 function deriveSubjectFromRequest(data) {
@@ -488,7 +1073,7 @@ function autofillIssueFieldsFromRequest(parsed, { showFeedback = false } = {}) {
     changed = true;
   }
 
-  if (parsed.attestationType && typeSelect && ATTESTATION_TYPE_CONFIG[parsed.attestationType]) {
+  if (parsed.attestationType && typeSelect && attestationTypeCatalog.has(parsed.attestationType)) {
     if (typeSelect.value !== parsed.attestationType) {
       typeSelect.value = parsed.attestationType;
       changed = true;
@@ -771,6 +1356,7 @@ function disconnectWallet() {
   contract = null;
   contractAddress = null;
   Web3Client.reset();
+  resetContractMetadata();
 
   // Reseta header
   document.getElementById("walletInfo").classList.add("hidden");
@@ -853,6 +1439,10 @@ async function connectWallet() {
     if (!contract) {
       const selVal = document.getElementById("selectContract").value;
       if (selVal) await attachContract(selVal);
+    }
+
+    if (!contractAddress && contractList.length === 0) {
+      maybePromptContractScan("Nenhum contrato configurado. Vamos buscar automaticamente?");
     }
 
     await refreshTabAccess();
@@ -999,6 +1589,7 @@ function removeSelectedContract() {
     contractAddress = null;
     contract = null;
     localStorage.removeItem("ip_contractAddress");
+    resetContractMetadata();
   }
 
   renderContractSelect();
@@ -1011,6 +1602,10 @@ function removeSelectedContract() {
   }
 
   showStatus(`Contrato ${shortAddr(addr)} removido da lista. (${before - contractList.length} removido(s))`, "info", 4000);
+
+  if (contractList.length === 0 && currentAccount) {
+    maybePromptContractScan("Nenhum contrato restante. Buscar automaticamente na blockchain?");
+  }
 }
 
 /**
@@ -1222,6 +1817,7 @@ async function attachContract(addr) {
     contractAddress = addr;
     contract = Web3Client.getContractWithSigner(CONTRACT_ABI, addr);
     localStorage.setItem("ip_contractAddress", addr);
+    updateContractMetadataUI();
 
     // Validação ABI em background (sempre tenta, independente do bytecode check)
     const valid = await _isIslamicPassportContract(addr);
@@ -1235,6 +1831,8 @@ async function attachContract(addr) {
 
     // Atualiza acesso às abas com base no estado on-chain
     await refreshTabAccess();
+    await loadAttestationTypesFromContract();
+    await refreshContractMetadata();
 
   } catch (err) {
     console.error("[attachContract] Erro:", err);
@@ -1854,146 +2452,53 @@ async function refreshSheikhs() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  C) Atesto de muçulmano
-// ═══════════════════════════════════════════════════════════
-
-/**
- * Handler do formulário de atesto.
- * @param {Event} e
- */
-async function handleAttest(e) {
+async function handleIssue(e) {
   e.preventDefault();
   if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
-  if (!canAttestMuslim) { showStatus("Apenas sheiks com certificado ativo podem atestar muçulmanos neste contrato.", "warning"); return; }
 
-  const subjectInput = document.getElementById("attestSubject");
-  const uriInput = document.getElementById("attestUri");
-
-  // Garante que JSON recém colado também preencha os campos antes de validar
-  const parsedRequest = parseAttestRequestJson({ silent: true });
-  if (parsedRequest && !parsedRequest.error) {
-    autofillAttestFieldsFromRequest(parsedRequest, { showFeedback: false });
+  const typeKey = document.getElementById("issueType").value || defaultAttestationType;
+  const meta = attestationTypeCatalog.get(typeKey);
+  if (!meta) {
+    showStatus("Tipo de credencial inválido.", "error");
+    return;
+  }
+  if (!isTypePermitted(typeKey)) {
+    showStatus("Você não possui permissão para emitir este tipo de credencial.", "warning");
+    return;
   }
 
-  const subject = subjectInput.value.trim();
-  const uri = uriInput.value.trim();
+  const subject = document.getElementById("issueSubject").value.trim();
+  const uri = document.getElementById("issueUri").value.trim();
 
   if (!ethers.isAddress(subject)) {
     showStatus("Endereço inválido.", "error");
     return;
   }
 
-  // Gera VC JSON local para o atesto
+  const buildClaims = meta.buildClaims || (() => ({ issuedBy: currentAccount }));
   const vc = buildVCJson({
-    type: "MuslimAttestation",
+    type: meta.vcType || meta.key,
     issuer: `did:ethr:${currentChainId}:${currentAccount}`,
     subject: `did:ethr:${currentChainId}:${subject}`,
-    claims: { attestedBy: currentAccount, attestationType: "MUSLIM_ATTESTATION" },
+    claims: { ...buildClaims(), attestationType: typeKey },
     issuedAt: BigInt(Math.floor(Date.now() / 1000))
   });
   const claimHash = vcClaimHash(vc);
 
+  const actionName = `Emitir ${meta.label}`;
   const receipt = await executeWithConfirmation(
-    "Atesto de Muçulmano",
-    "attestMuslim",
+    actionName,
+    meta.contractMethod || "attestMuslim",
     [subject, claimHash, uri]
   );
 
   if (receipt) {
-    console.log(`[handleAttest] TX hash: ${receipt.hash}`);
-    console.log(`[handleAttest] Contrato: ${contractAddress}`);
-    console.log(`[handleAttest] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
-    if (receipt.logs && receipt.logs.length > 0) {
-      for (let i = 0; i < receipt.logs.length; i++) {
-        const log = receipt.logs[i];
-        try {
-          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
-          if (parsed) {
-            console.log(`[handleAttest] Log[${i}] parsed event: ${parsed.name}`, parsed.args);
-            if (parsed.name === "CredentialIssued") {
-              console.log(`[handleAttest] ✅ CredentialIssued → credentialId: ${parsed.args[0].toString()}, type: ${CRED_TYPE_NAMES[Number(parsed.args[1])] || parsed.args[1]}, issuer: ${parsed.args[2]}, subject: ${parsed.args[3]}`);
-            } else if (parsed.name === "AttestedMuslim") {
-              console.log(`[handleAttest] ✅ AttestedMuslim → issuer: ${parsed.args[0]}, subject: ${parsed.args[1]}, credentialId: ${parsed.args[2].toString()}`);
-            }
-          }
-        } catch (parseErr) {
-          console.warn(`[handleAttest] Log[${i}] parse falhou:`, parseErr.message);
-        }
-      }
-    } else {
-      console.warn("[handleAttest] Nenhum log no receipt.", receipt);
-    }
-
-    showStatus("Atesto emitido com sucesso!", "success");
-    document.getElementById("formAttest").reset();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  D) Promoção a sheik
-// ═══════════════════════════════════════════════════════════
-
-/**
- * Handler do formulário de promoção.
- * @param {Event} e
- */
-async function handlePromote(e) {
-  e.preventDefault();
-  if (!contract) { showStatus("Configure o contrato.", "warning"); return; }
-  if (!canPromoteToSheik) { showStatus("Somente sheiks ativos ou o SuperAdmin da V2 podem promover sheiks.", "warning"); return; }
-
-  const subject = document.getElementById("promoteSubject").value.trim();
-  const uri = document.getElementById("promoteUri").value.trim();
-
-  if (!ethers.isAddress(subject)) {
-    showStatus("Endereço inválido.", "error");
-    return;
-  }
-
-  // Gera VC JSON local para a promoção
-  const vc = buildVCJson({
-    type: "SheikhCertificate",
-    issuer: `did:ethr:${currentChainId}:${currentAccount}`,
-    subject: `did:ethr:${currentChainId}:${subject}`,
-    claims: { promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" },
-    issuedAt: BigInt(Math.floor(Date.now() / 1000))
-  });
-  const claimHash = vcClaimHash(vc);
-
-  const receipt = await executeWithConfirmation(
-    "Promoção a Sheik",
-    "promoteToSheikh",
-    [subject, claimHash, uri]
-  );
-
-  if (receipt) {
-    console.log(`[handlePromote] TX hash: ${receipt.hash}`);
-    console.log(`[handlePromote] Contrato: ${contractAddress}`);
-    console.log(`[handlePromote] Logs no receipt: ${receipt.logs ? receipt.logs.length : 0}`);
-    if (receipt.logs && receipt.logs.length > 0) {
-      for (let i = 0; i < receipt.logs.length; i++) {
-        const log = receipt.logs[i];
-        try {
-          const parsed = contract.interface.parseLog({ topics: log.topics, data: log.data });
-          if (parsed) {
-            console.log(`[handlePromote] Log[${i}] parsed event: ${parsed.name}`, parsed.args);
-            if (parsed.name === "CredentialIssued") {
-              console.log(`[handlePromote] ✅ CredentialIssued → credentialId: ${parsed.args[0].toString()}, type: ${CRED_TYPE_NAMES[Number(parsed.args[1])] || parsed.args[1]}, issuer: ${parsed.args[2]}, subject: ${parsed.args[3]}`);
-            } else if (parsed.name === "SheikhPromoted") {
-              console.log(`[handlePromote] ✅ SheikhPromoted → issuer: ${parsed.args[0]}, subject: ${parsed.args[1]}, credentialId: ${parsed.args[2].toString()}`);
-            }
-          }
-        } catch (parseErr) {
-          console.warn(`[handlePromote] Log[${i}] parse falhou:`, parseErr.message);
-        }
-      }
-    } else {
-      console.warn("[handlePromote] Nenhum log no receipt.", receipt);
-    }
-
-    showStatus("Promoção a sheik realizada com sucesso!", "success");
-    document.getElementById("formPromote").reset();
+    console.log(`[handleIssue] ${actionName} TX hash: ${receipt.hash}`);
+    const successMsg = meta.successMessage || `${meta.label} emitido com sucesso!`;
+    showStatus(successMsg, "success");
+    document.getElementById("formIssue").reset();
+    document.getElementById("issueType").value = defaultAttestationType;
+    updateIssueRulesHint();
   }
 }
 
@@ -2154,9 +2659,11 @@ function importVC(e) {
 // ═══════════════════════════════════════════════════════════
 
 document.addEventListener("DOMContentLoaded", () => {
+  updateContractMetadataUI();
 
   // ── Estado inicial: desabilitar botões on-chain ──
   setOnchainButtonsEnabled(false);
+  refreshAttestationTypeSelects();
   refreshTabAccess();
 
   // ── Conectar carteira ──
@@ -2177,6 +2684,34 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Buscar contratos na blockchain ──
   document.getElementById("btnScanContracts").addEventListener("click", scanBlockchainForContracts);
+
+  const contractScanManualInput = document.getElementById("contractScanManualInput");
+  if (contractScanManualInput) {
+    contractScanManualInput.addEventListener("input", handleContractScanManualInput);
+  }
+
+  const contractScanAcceptBtn = document.getElementById("contractScanAccept");
+  if (contractScanAcceptBtn) {
+    contractScanAcceptBtn.addEventListener("click", () => { handleContractScanAccept(); });
+  }
+
+  const contractScanRescanBtn = document.getElementById("contractScanRescan");
+  if (contractScanRescanBtn) {
+    contractScanRescanBtn.addEventListener("click", () => {
+      if (contractScanModalState.running) return;
+      contractScanModalState.foundAddress = null;
+      contractScanModalState.foundBlock = null;
+      setContractScanResult(null, null);
+      runContractScanModal();
+    });
+  }
+
+  const contractScanReconnectBtn = document.getElementById("contractScanReconnect");
+  if (contractScanReconnectBtn) {
+    contractScanReconnectBtn.addEventListener("click", () => {
+      connectWallet();
+    });
+  }
 
   // ── Selecionar contrato do combobox ──
   document.getElementById("selectContract").addEventListener("change", (e) => {
@@ -2214,33 +2749,49 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // ── Registro ──
-  document.getElementById("formRegister").addEventListener("submit", handleRegister);
-
-  // ── Atesto ──
-  document.getElementById("formAttest").addEventListener("submit", handleAttest);
-  const attestRequestTextarea = document.getElementById("attestRequestJSON");
-  if (attestRequestTextarea) {
-    const handleParseAttestJson = () => {
-      const parsed = parseAttestRequestJson({ silent: true });
-      if (parsed && !parsed.error) {
-        autofillAttestFieldsFromRequest(parsed, { showFeedback: true });
-      }
-    };
-    ["blur", "change"].forEach(evt => attestRequestTextarea.addEventListener(evt, handleParseAttestJson));
-  }
-  const attestJsonFileInput = document.getElementById("attestJsonFile");
-  if (attestJsonFileInput) {
-    attestJsonFileInput.addEventListener("change", handleAttestJsonFileChange);
+  const formRegister = document.getElementById("formRegister");
+  if (formRegister) {
+    formRegister.addEventListener("submit", handleRegister);
   }
 
-  // ── Promoção ──
-  document.getElementById("formPromote").addEventListener("submit", handlePromote);
+  // ── Emissão unificada ──
+  const formIssue = document.getElementById("formIssue");
+  if (formIssue) {
+    formIssue.addEventListener("submit", handleIssue);
+
+    const issueRequestTextarea = document.getElementById("issueRequestJSON");
+    if (issueRequestTextarea) {
+      const handleParseIssueJson = () => {
+        const parsed = parseIssueRequestJson({ silent: true });
+        if (parsed && !parsed.error) {
+          autofillIssueFieldsFromRequest(parsed, { showFeedback: true });
+        }
+      };
+      ["blur", "change"].forEach(evt => issueRequestTextarea.addEventListener(evt, handleParseIssueJson));
+    }
+
+    const issueJsonFileInput = document.getElementById("issueJsonFile");
+    if (issueJsonFileInput) {
+      issueJsonFileInput.addEventListener("change", handleIssueJsonFileChange);
+    }
+
+    const issueTypeSelect = document.getElementById("issueType");
+    if (issueTypeSelect) {
+      issueTypeSelect.addEventListener("change", updateIssueRulesHint);
+    }
+  }
 
   // ── Revogação ──
-  document.getElementById("formRevoke").addEventListener("submit", handleRevoke);
+  const formRevoke = document.getElementById("formRevoke");
+  if (formRevoke) {
+    formRevoke.addEventListener("submit", handleRevoke);
+  }
 
   // ── Solicitar atesto ──
-  document.getElementById("formRequest").addEventListener("submit", handleRequest);
+  const formRequest = document.getElementById("formRequest");
+  if (formRequest) {
+    formRequest.addEventListener("submit", handleRequest);
+  }
 
   // ── Copiar pedido ──
   document.getElementById("btnCopyRequest").addEventListener("click", () => {

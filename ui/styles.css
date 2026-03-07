@@ -55,6 +55,63 @@ header h1 span {
   color: var(--accent);
 }
 
+.header-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.contract-meta-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(255,255,255,0.12);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem 0.35rem 0.6rem;
+  border: 1px solid rgba(255,255,255,0.25);
+  transition: background 0.2s, border 0.2s;
+}
+
+.contract-meta-pill--empty {
+  opacity: 0.7;
+}
+
+.contract-meta-text span {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.contract-meta-text small {
+  display: block;
+  font-size: 0.7rem;
+  opacity: 0.85;
+}
+
+.contract-info-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #fff;
+  color: var(--primary-dark);
+  font-weight: 800;
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s, opacity 0.2s;
+}
+
+.contract-info-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.contract-info-btn:not(:disabled):hover {
+  transform: scale(1.05);
+}
+
 #walletSection {
   display: flex;
   align-items: center;
@@ -667,6 +724,173 @@ table tr:hover td {
   gap: 0.8rem;
   justify-content: flex-end;
   margin-top: 1.2rem;
+}
+
+.contract-scan-box {
+  max-width: 640px;
+}
+
+.contract-scan-reason {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.contract-scan-status {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--primary-dark);
+  margin-bottom: 0.6rem;
+}
+
+.contract-scan-log {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafaf5;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.78rem;
+  padding: 0.6rem;
+  max-height: 150px;
+  overflow-y: auto;
+  margin-bottom: 0.6rem;
+}
+
+.contract-scan-result {
+  border: 1px solid var(--primary-light);
+  border-radius: 6px;
+  background: rgba(76,175,80,0.08);
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.contract-scan-result code {
+  display: block;
+  font-family: 'Consolas','Monaco',monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+  margin-top: 0.3rem;
+  color: var(--primary-dark);
+}
+
+.contract-scan-manual-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+#contractScanManualInput {
+  width: 100%;
+  margin: 0.3rem 0 0.6rem;
+  font-family: 'Consolas','Monaco',monospace;
+}
+
+.contract-scan-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.8rem;
+}
+
+.contract-scan-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.contract-info-modal {
+  max-width: 640px;
+  position: relative;
+}
+
+.modal-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: transparent;
+  border: none;
+  font-size: 1.4rem;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.contract-info-address {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.8rem;
+  word-break: break-all;
+}
+
+.contract-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.contract-info-grid label,
+.contract-info-section label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-secondary);
+}
+
+.contract-info-grid strong,
+.contract-info-section strong,
+.contract-info-grid code {
+  display: block;
+  font-size: 0.95rem;
+  margin-top: 0.2rem;
+  color: var(--primary-dark);
+  word-break: break-all;
+}
+
+.contract-info-section {
+  margin-bottom: 1rem;
+}
+
+.contract-info-authors {
+  list-style: none;
+  padding-left: 0;
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.contract-info-authors li {
+  padding: 0.15rem 0;
+}
+
+.feature-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+}
+
+.feature-chip {
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #eceff1;
+  color: var(--primary-dark);
+}
+
+.feature-chip-on {
+  background: rgba(76,175,80,0.2);
+  color: var(--primary-dark);
+}
+
+.feature-chip-off {
+  background: rgba(244, 67, 54, 0.15);
+  color: #b71c1c;
+}
+
+.feature-chip-empty {
+  background: rgba(0,0,0,0.08);
+  color: var(--text-secondary);
 }
 
 /* ───── TX Spinner ───── */

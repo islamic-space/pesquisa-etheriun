@@ -11,7 +11,18 @@
 
   <!-- ═══════════ Header ═══════════ -->
   <header>
-    <h1><img src="icon.svg" alt="Islamic Passport" style="height:36px;vertical-align:middle;margin-right:8px;"/>Islamic<span>Passport</span></h1>
+    <div class="header-brand">
+      <h1><img src="icon.svg" alt="Islamic Passport" style="height:36px;vertical-align:middle;margin-right:8px;"/>Islamic<span>Passport</span></h1>
+      <div class="contract-meta-pill" id="contractMetaPill">
+        <div class="contract-meta-text">
+          <span id="contractMetaName">Contrato não configurado</span>
+          <small id="contractMetaVersion">—</small>
+        </div>
+        <button id="contractInfoButton" class="contract-info-btn" title="Detalhes do contrato" aria-label="Detalhes do contrato" disabled>
+          <span>!</span>
+        </button>
+      </div>
+    </div>
     <div id="walletSection">
       <div class="wallet-info hidden" id="walletInfo">
         <div id="walletAddress"></div>
@@ -65,6 +76,53 @@
     </div>
   </div>
 
+  <!-- ═══════════ Contract Info Modal ═══════════ -->
+  <div id="contractInfoModal" class="modal-overlay hidden">
+    <div class="modal-box contract-info-modal">
+      <button class="modal-close" id="contractInfoClose" aria-label="Fechar modal">×</button>
+      <h3>Detalhes do contrato</h3>
+      <p class="contract-info-address" id="contractInfoAddress">Nenhum contrato ativo.</p>
+      <div class="contract-info-grid">
+        <div>
+          <label>Nome</label>
+          <strong id="contractInfoName">—</strong>
+        </div>
+        <div>
+          <label>Versão</label>
+          <strong id="contractInfoVersion">—</strong>
+        </div>
+        <div>
+          <label>Data de deploy</label>
+          <strong id="contractInfoDate">—</strong>
+        </div>
+        <div>
+          <label>Timestamp</label>
+          <strong id="contractInfoTimestamp">—</strong>
+        </div>
+        <div>
+          <label>Chain ID</label>
+          <strong id="contractInfoChain">—</strong>
+        </div>
+        <div>
+          <label>Endereço</label>
+          <code id="contractInfoAddressInline">—</code>
+        </div>
+      </div>
+      <div class="contract-info-section">
+        <label>Autores</label>
+        <ul id="contractInfoAuthors" class="contract-info-authors">
+          <li>—</li>
+        </ul>
+      </div>
+      <div class="contract-info-section">
+        <label>Recursos</label>
+        <div id="contractInfoFeatures" class="feature-chips">
+          <span class="feature-chip feature-chip-empty">Sem dados</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════ TX Confirmation Modal ═══════════ -->
   <div id="txModal" class="modal-overlay hidden">
     <div class="modal-box">
@@ -78,6 +136,30 @@
       <div class="modal-actions">
         <button id="txModalConfirm" class="btn btn-primary">Confirmar</button>
         <button id="txModalCancel" class="btn btn-danger">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Contract Scan Modal ═══════════ -->
+  <div id="contractScanModal" class="modal-overlay hidden">
+    <div class="modal-box contract-scan-box">
+      <h3>Buscar contrato IslamicPassport</h3>
+      <p id="contractScanReason" class="contract-scan-reason">Nenhum contrato configurado nesta rede.</p>
+      <p id="contractScanStatus" class="contract-scan-status">Aguardando início da varredura…</p>
+      <div id="contractScanLog" class="contract-scan-log"></div>
+      <div id="contractScanResult" class="contract-scan-result hidden">
+        <p>Contrato encontrado no bloco <span id="contractScanBlock">—</span></p>
+        <code id="contractScanAddress">0x...</code>
+      </div>
+      <label class="contract-scan-manual-label" for="contractScanManualInput">
+        Informar endereço manualmente (opcional)
+      </label>
+      <input type="text" id="contractScanManualInput" placeholder="0x... (override manual)" />
+      <small class="contract-scan-hint">A busca percorre até 10.000 blocos a partir do mais recente.</small>
+      <div class="contract-scan-actions">
+        <button id="contractScanAccept" class="btn btn-primary" disabled>Usar contrato</button>
+        <button id="contractScanRescan" class="btn btn-accent">Buscar novamente</button>
+        <button id="contractScanReconnect" class="btn">Reconectar MetaMask</button>
       </div>
     </div>
   </div>
