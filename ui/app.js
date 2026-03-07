@@ -532,6 +532,8 @@ async function connectWallet() {
       if (selVal) await attachContract(selVal);
     }
 
+    await refreshTabAccess();
+
   } catch (err) {
     console.error("[connectWallet] Erro:", err);
     if (err.code === -32002) {
@@ -1854,12 +1856,24 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("selectAccount").addEventListener("change", async (e) => {
     const addr = e.target.value;
     if (!addr) return;
-    // Troca a conta ativa — infelizmente MetaMask não permite trocar programaticamente,
-    // mas podemos pedir ao usuário que troque no MetaMask.
-    // Se a conta selecionada já é a conectada, noop.
-    if (addr.toLowerCase() !== currentAccount.toLowerCase()) {
-      showStatus("Para trocar de conta, selecione-a diretamente no MetaMask. A página irá recarregar automaticamente.", "warning", 8000);
+
+    if (!Web3Client.isMetaMaskAvailable()) {
+      showStatus("MetaMask não encontrado. Instale a extensão para continuar.", "error");
+      return;
     }
+
+    if (_connecting) {
+      showStatus("Já existe uma solicitação de conexão pendente.", "info", 4000);
+      return;
+    }
+
+    if (currentAccount && addr.toLowerCase() === currentAccount.toLowerCase()) {
+      await refreshTabAccess();
+      return;
+    }
+
+    showStatus("Selecione a conta desejada no MetaMask para continuar.", "info", 6000);
+    await connectWallet();
   });
 
   // ── Tabs ──

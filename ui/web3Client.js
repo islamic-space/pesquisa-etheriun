@@ -163,6 +163,27 @@ const Web3Client = (() => {
     return new ethers.Contract(address, abi, s);
   }
 
+  /**
+   * Atualiza o signer atual para outro endereço autorizado no MetaMask.
+   * Não abre popup; requer que o endereço já tenha sido autorizado anteriormente.
+   * @param {string} address
+   * @returns {Promise<string>} Endereço confirmado pelo signer
+   */
+  async function switchAccount(address) {
+    if (!address) {
+      throw new Error("Endereço inválido para troca de conta.");
+    }
+    if (!isMetaMaskAvailable()) {
+      throw new Error("MetaMask não encontrado.");
+    }
+    if (!_provider) {
+      _provider = new ethers.BrowserProvider(window.ethereum);
+    }
+    _signer = await _provider.getSigner(address);
+    _address = await _signer.getAddress();
+    return _address;
+  }
+
   // ─────────────────────────────────────────────
   //  Estimativa de custo de transação
   // ─────────────────────────────────────────────
@@ -285,6 +306,7 @@ const Web3Client = (() => {
     getAddress,
     getChainId,
     getContractWithSigner,
+    switchAccount,
     estimateTxCost,
     listenMetaMaskEvents,
     parseError,

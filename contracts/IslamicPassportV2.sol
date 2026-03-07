@@ -193,20 +193,19 @@ contract IslamicPassportV2 is AccessControl {
 
         if (!_firstSheikhAssigned) {
             require(hasRole(SUPER_ADMIN_ROLE, msg.sender), "IslamicPassport: apenas SuperAdmin pode nomear o primeiro sheik");
-
-            if (!_hasActiveMuslimAttestation(subject)) {
-                muslimCredId = _issueCredential(
-                    CredentialType.MUSLIM_ATTESTATION,
-                    msg.sender,
-                    subject,
-                    bytes32(0),
-                    ""
-                );
-                emit AttestedMuslim(msg.sender, subject, muslimCredId);
-            }
         } else {
             require(_canActAsAttestedSheikh(msg.sender), "IslamicPassport: apenas sheik atestado pode promover sheiks");
-            require(_hasActiveMuslimAttestation(subject), "IslamicPassport: subject precisa de atestado de muculmano");
+        }
+
+        if (!_hasActiveMuslimAttestation(subject)) {
+            muslimCredId = _issueCredential(
+                CredentialType.MUSLIM_ATTESTATION,
+                msg.sender,
+                subject,
+                bytes32(0),
+                ""
+            );
+            emit AttestedMuslim(msg.sender, subject, muslimCredId);
         }
 
         _grantRole(SHEIK_ROLE, subject);
