@@ -1,1 +1,5 @@
 instruções.txt
+.deps
+.states
+produtos-transações
+!/contracts/*.sol
