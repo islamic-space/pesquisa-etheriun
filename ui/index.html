@@ -216,58 +216,41 @@
       </div>
     </section>
 
-    <!-- ══════════════════════════════════════ TAB: Attest / Promote ══════════════════════════════════════ -->
+    <!-- ══════════════════════════════════════ TAB: Emissão / Revogação ══════════════════════════════════════ -->
     <section id="tabAttest" class="tab-panel">
-      <!-- Atesto -->
       <div class="card">
-        <h2>Atestar Muçulmano</h2>
-        <p id="attestRulesHint" class="mb-2" style="font-size:0.82rem;color:var(--text-secondary);">
-          Disponível apenas para sheiks com certificado ativo.
+        <h2>Emitir Credencial On-chain</h2>
+        <p id="issueRulesHint" class="mb-2" style="font-size:0.82rem;color:var(--text-secondary);">
+          Selecione o tipo de atesto que deseja emitir.
         </p>
-        <form id="formAttest" autocomplete="off">
+        <form id="formIssue" autocomplete="off">
           <div class="form-group">
-            <label>Endereço do muçulmano (subject)</label>
-            <input type="text" id="attestSubject" placeholder="0x..." required />
+            <label>Tipo de credencial</label>
+            <select id="issueType"></select>
+          </div>
+          <div class="form-group">
+            <label>Endereço do subject</label>
+            <input type="text" id="issueSubject" placeholder="0x..." required />
           </div>
           <div class="form-group">
             <label>Pedido/Certificado JSON (opcional)</label>
-            <textarea id="attestRequestJSON" rows="5" placeholder="Cole aqui o JSON recebido do solicitante..."></textarea>
+            <textarea id="issueRequestJSON" rows="5" placeholder="Cole aqui o JSON recebido do solicitante..."></textarea>
             <small style="display:block;margin-top:0.35rem;color:var(--text-secondary);">
               Você pode colar o conteúdo de <code>attest-request-*.json</code> ou fazer upload abaixo para carregar automaticamente.
             </small>
             <label class="mt-1" style="font-size:0.85rem;font-weight:500;display:block;">
               Upload de arquivo JSON
-              <input type="file" id="attestJsonFile" accept=".json,application/json" />
+              <input type="file" id="issueJsonFile" accept=".json,application/json" />
             </label>
           </div>
           <div class="form-group">
             <label>URI off-chain (opcional)</label>
-            <input type="text" id="attestUri" placeholder="ipfs://..." />
+            <input type="text" id="issueUri" placeholder="ipfs://..." />
           </div>
-          <button type="submit" class="btn btn-primary">Emitir Atesto</button>
+          <button type="submit" class="btn btn-primary">Emitir Credencial</button>
         </form>
       </div>
 
-      <!-- Promoção -->
-      <div class="card">
-        <h2>Promover a Sheik</h2>
-        <p id="promoteRulesHint" class="mb-2" style="font-size:0.82rem;color:var(--text-secondary);">
-          O primeiro sheik pode ser nomeado pelo SuperAdmin. Depois disso, apenas sheiks com certificado ativo podem promover novos sheiks, e o candidato deve possuir atestado de muçulmano.
-        </p>
-        <form id="formPromote" autocomplete="off">
-          <div class="form-group">
-            <label>Endereço do novo sheik (subject)</label>
-            <input type="text" id="promoteSubject" placeholder="0x..." required />
-          </div>
-          <div class="form-group">
-            <label>URI off-chain (opcional)</label>
-            <input type="text" id="promoteUri" placeholder="ipfs://..." />
-          </div>
-          <button type="submit" class="btn btn-accent">Promover a Sheik</button>
-        </form>
-      </div>
-
-      <!-- Revogar -->
       <div class="card">
         <h2>Revogar Credencial</h2>
         <form id="formRevoke" autocomplete="off">
@@ -289,8 +272,15 @@
         </p>
         <form id="formRequest" autocomplete="off">
           <div class="form-group">
-            <label>Endereço do Sheik</label>
-            <input type="text" id="reqSheikh" placeholder="0x..." required />
+            <label>Tipo de atesto solicitado</label>
+            <select id="requestType"></select>
+          </div>
+          <div class="form-group">
+            <label>ID/DID do Sheik</label>
+            <input type="text" id="reqSheikh" list="sheikhDirectoryList" placeholder="did:ethr:... ou 0x..." required />
+            <small style="display:block;margin-top:0.35rem;color:var(--text-secondary);">
+              Digite ou selecione um sheik listado na aba "Sheikhs". Use o botão "Atualizar Lista" para atualizar as sugestões.
+            </small>
           </div>
           <div class="form-group">
             <label>Mensagem adicional (opcional)</label>
@@ -298,6 +288,7 @@
           </div>
           <button type="submit" class="btn btn-primary">Gerar Pedido</button>
         </form>
+        <datalist id="sheikhDirectoryList"></datalist>
         <div id="requestOutput" class="mt-2 hidden">
           <label style="font-weight:600;font-size:0.85rem;">JSON do pedido:</label>
           <textarea id="requestJSON" readonly rows="8"></textarea>

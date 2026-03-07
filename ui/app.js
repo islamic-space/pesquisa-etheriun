@@ -81,12 +81,128 @@ const CRED_BADGE_CLASS = ["badge-initial", "badge-muslim", "badge-sheik"];
  */
 const ONCHAIN_BUTTONS_SELECTOR = [
   '#formRegister button[type="submit"]',
-  '#formAttest button[type="submit"]',
-  '#formPromote button[type="submit"]',
+  '#formIssue button[type="submit"]',
   '#formRevoke button[type="submit"]',
   '#btnExportVC',
   '#btnRefreshSheikhs'
 ].join(",");
+
+const ATTESTATION_TYPE_CONFIG = {
+  MUSLIM_ATTESTATION: {
+    label: "Atestado de Muçulmano",
+    vcType: "MuslimAttestation",
+    contractMethod: "attestMuslim",
+    permissionCheck: () => canAttestMuslim,
+    permissionMessage: "Apenas sheiks com certificado ativo podem emitir atestados de muçulmano neste contrato.",
+    successMessage: "Atestado de muçulmano emitido com sucesso!",
+    hint: "Requer certificado ativo de sheik e confirma a fé do solicitante.",
+    buildClaims: () => ({ attestedBy: currentAccount })
+  },
+  SHEIK_CERTIFICATE: {
+    label: "Certificado de Sheik",
+    vcType: "SheikhCertificate",
+    contractMethod: "promoteToSheikh",
+    permissionCheck: () => canPromoteToSheik,
+    permissionMessage: "Somente sheiks ativos ou o SuperAdmin da V2 podem promover novos sheiks.",
+    successMessage: "Promoção a sheik realizada com sucesso!",
+    hint: "Disponível para sheiks ativos ou SuperAdmin e concede certificado de liderança.",
+    buildClaims: () => ({ promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" })
+  }
+};
+
+const DEFAULT_ATTESTATION_TYPE = "MUSLIM_ATTESTATION";
+
+/** @type {{address: string, did: string}[]} */
+let sheikhDirectory = [];
+
+function getAttestationTypeLabel(type) {
+  const cfg = ATTESTATION_TYPE_CONFIG[type];
+  return cfg ? cfg.label : type;
+}
+
+function getFirstPermittedAttestationType() {
+  const entry = Object.entries(ATTESTATION_TYPE_CONFIG).find(([, cfg]) => cfg.permissionCheck());
+  return entry ? entry[0] : DEFAULT_ATTESTATION_TYPE;
+}
+
+function populateAttestationTypeSelect(selectEl) {
+  if (!selectEl) return;
+  selectEl.innerHTML = "";
+  Object.entries(ATTESTATION_TYPE_CONFIG).forEach(([key, cfg]) => {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = cfg.label;
+    selectEl.appendChild(opt);
+  });
+  selectEl.value = DEFAULT_ATTESTATION_TYPE;
+}
+
+function refreshIssueTypeAvailability() {
+  const select = document.getElementById("issueType");
+  if (!select) return;
+  let needsFallback = false;
+  Array.from(select.options).forEach((option) => {
+    const cfg = ATTESTATION_TYPE_CONFIG[option.value];
+    if (!cfg) return;
+    const allowed = cfg.permissionCheck();
+    option.disabled = !allowed;
+    if (!allowed && select.value === option.value) {
+      needsFallback = true;
+    }
+  });
+  if (needsFallback) {
+    select.value = getFirstPermittedAttestationType();
+  }
+  updateIssueRulesHint();
+}
+
+function updateIssueRulesHint() {
+  const hintEl = document.getElementById("issueRulesHint");
+  if (!hintEl) return;
+  const select = document.getElementById("issueType");
+  const cfg = select ? ATTESTATION_TYPE_CONFIG[select.value] : null;
+  if (!cfg) {
+    hintEl.textContent = "Selecione o tipo de credencial a ser emitida.";
+    return;
+  }
+  hintEl.textContent = cfg.permissionCheck() ? cfg.hint : cfg.permissionMessage;
+}
+
+function updateSheikhDirectoryList() {
+  const datalist = document.getElementById("sheikhDirectoryList");
+  if (!datalist) return;
+  datalist.innerHTML = "";
+  sheikhDirectory.forEach((entry) => {
+    const opt = document.createElement("option");
+    opt.value = entry.did || entry.address;
+    opt.textContent = `${entry.did || "(sem DID)"} — ${shortAddr(entry.address)}`;
+    datalist.appendChild(opt);
+  });
+}
+
+function resolveSheikhDirectoryEntry(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  const entry = sheikhDirectory.find((item) => {
+    return (
+      (item.did && item.did.toLowerCase() === lower) ||
+      item.address.toLowerCase() === lower
+    );
+  });
+  if (entry) return entry;
+  const candidate = extractAddressCandidate(trimmed);
+  if (candidate) {
+    try {
+      const addr = ethers.getAddress(candidate);
+      return { address: addr, did: null };
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
+}
 
 // ═══════════════════════════════════════════════════════════
 //  Helpers
@@ -229,6 +345,24 @@ function extractAddressCandidate(value) {
   return null;
 }
 
+function normalizeAttestationTypeKey(value) {
+  if (!value) return null;
+  const str = Array.isArray(value) ? value.join(",") : String(value);
+  if (!str) return null;
+  const trimmed = str.trim();
+  if (!trimmed) return null;
+  if (ATTESTATION_TYPE_CONFIG[trimmed]) return trimmed;
+  const upper = trimmed.toUpperCase();
+  if (ATTESTATION_TYPE_CONFIG[upper]) return upper;
+  const byLabel = Object.entries(ATTESTATION_TYPE_CONFIG).find(([, cfg]) => {
+    return (
+      cfg.label.toLowerCase() === trimmed.toLowerCase() ||
+      cfg.vcType.toLowerCase() === trimmed.toLowerCase()
+    );
+  });
+  return byLabel ? byLabel[0] : null;
+}
+
 function deriveSubjectFromRequest(data) {
   const candidates = [
     data.subject,
@@ -275,13 +409,41 @@ function deriveUriFromRequest(data) {
   return null;
 }
 
+function deriveAttestationTypeFromRequest(data) {
+  if (!data || typeof data !== "object") return null;
+  const candidates = [
+    data.attestationType,
+    data.requestedType,
+    data.requestedCredentialType,
+    data.credentialType,
+    data.type,
+    data.credential?.type,
+    data.credential?.types,
+    data.claims?.attestationType,
+    data.metadata?.attestationType
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const normalized = normalizeAttestationTypeKey(item);
+        if (normalized) return normalized;
+      }
+    } else {
+      const normalized = normalizeAttestationTypeKey(candidate);
+      if (normalized) return normalized;
+    }
+  }
+  return null;
+}
+
 /**
  * Lê o JSON informado na aba de atesto e extrai dados úteis.
- * @param {{silent?: boolean}} [options]
- * @returns {{data: object, subject?: string, uri?: string}|{error: true}|null}
+ * @param {{silent?: boolean, elementId?: string}} [options]
+ * @returns {{data: object, subject?: string, uri?: string, attestationType?: string}|{error: true}|null}
  */
-function parseAttestRequestJson({ silent = false } = {}) {
-  const textarea = document.getElementById("attestRequestJSON");
+function parseIssueRequestJson({ silent = false, elementId = "issueRequestJSON" } = {}) {
+  const textarea = document.getElementById(elementId);
   if (!textarea) return null;
   const raw = textarea.value.trim();
   if (!raw) return null;
@@ -291,26 +453,28 @@ function parseAttestRequestJson({ silent = false } = {}) {
     return {
       data,
       subject: deriveSubjectFromRequest(data),
-      uri: deriveUriFromRequest(data)
+      uri: deriveUriFromRequest(data),
+      attestationType: deriveAttestationTypeFromRequest(data)
     };
   } catch (err) {
     if (!silent) {
       showStatus("Não foi possível ler o JSON do pedido/certificado. Verifique o conteúdo.", "error");
     }
-    console.warn("[parseAttestRequestJson] Falha ao processar JSON:", err.message);
+    console.warn("[parseIssueRequestJson] Falha ao processar JSON:", err.message);
     return { error: true };
   }
 }
 
 /**
  * Preenche campos do formulário de atesto com dados derivados do JSON.
- * @param {{subject?: string, uri?: string, error?: boolean}|null} parsed
+ * @param {{subject?: string, uri?: string, attestationType?: string, error?: boolean}|null} parsed
  * @param {{showFeedback?: boolean}} [options]
  */
-function autofillAttestFieldsFromRequest(parsed, { showFeedback = false } = {}) {
+function autofillIssueFieldsFromRequest(parsed, { showFeedback = false } = {}) {
   if (!parsed || parsed.error) return;
-  const subjectInput = document.getElementById("attestSubject");
-  const uriInput = document.getElementById("attestUri");
+  const subjectInput = document.getElementById("issueSubject");
+  const uriInput = document.getElementById("issueUri");
+  const typeSelect = document.getElementById("issueType");
 
   let changed = false;
 
@@ -324,36 +488,45 @@ function autofillAttestFieldsFromRequest(parsed, { showFeedback = false } = {}) 
     changed = true;
   }
 
+  if (parsed.attestationType && typeSelect && ATTESTATION_TYPE_CONFIG[parsed.attestationType]) {
+    if (typeSelect.value !== parsed.attestationType) {
+      typeSelect.value = parsed.attestationType;
+      changed = true;
+    }
+  }
+
+  updateIssueRulesHint();
+
   if (changed && showFeedback) {
     showStatus("Campos preenchidos automaticamente a partir do JSON fornecido.", "info", 3000);
   }
 }
 
 /**
- * Handler do upload de arquivo JSON na aba de atesto.
+ * Handler do upload de arquivo JSON na aba de emissão.
  * @param {Event} event
  */
-async function handleAttestJsonFileChange(event) {
+async function handleIssueJsonFileChange(event) {
   const input = event.target;
   const file = input?.files?.[0];
   if (!file) return;
 
   try {
     const text = await file.text();
-    const textarea = document.getElementById("attestRequestJSON");
+    const textarea = document.getElementById("issueRequestJSON");
     if (textarea) {
       textarea.value = text.trim();
     }
-    const parsed = parseAttestRequestJson({ silent: true });
+    const parsed = parseIssueRequestJson({ silent: true });
     if (parsed && !parsed.error) {
-      autofillAttestFieldsFromRequest(parsed, { showFeedback: false });
+      autofillIssueFieldsFromRequest(parsed, { showFeedback: false });
       showStatus(`Arquivo ${file.name} carregado.`, "success", 3500);
     } else {
       showStatus("Arquivo carregado, mas o conteúdo não é um JSON válido.", "error");
     }
   } catch (err) {
     showStatus("Não foi possível ler o arquivo JSON.", "error");
-    console.warn("[handleAttestJsonFileChange] Erro ao ler arquivo:", err.message);
+    console.warn("[handleIssueJsonFileChange] Erro ao ler arquivo:", err.message);
   } finally {
     if (input) {
       input.value = "";
