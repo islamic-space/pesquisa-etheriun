@@ -8,7 +8,9 @@ enum CredentialType {
     INITIAL,
     MUSLIM_ATTESTATION,
     SHEIK_CERTIFICATE,
-    DYNAMIC_CERTIFICATE
+    DYNAMIC_CERTIFICATE,
+    SUFI_CERTIFICATE,
+    DONATION_CERTIFICATE
 }
 
 enum DynamicAudienceRule {
@@ -26,6 +28,13 @@ enum DynamicCertificateCategory {
     OUTROS
 }
 
+enum PrayerLocationType {
+    MESQUITA,
+    MUSALLAH,
+    ZAWIYA,
+    OUTRO
+}
+
 struct Credential {
     uint256 id;
     CredentialType credType;
@@ -34,7 +43,9 @@ struct Credential {
     bytes32 claimHash;
     string uri;
     uint256 issuedAt;
+    uint16 validityMonths;
     bool revoked;
+    uint256 revokedAt;
 }
 
 struct DynamicCredentialStatus {
@@ -58,6 +69,7 @@ struct DynamicCertificateType {
     address createdBy;
     uint256 publicationFee;
     address payoutAddress;
+    uint16 defaultValidityMonths;
     address[] authorizedSheikhs;
     bool exists;
 }
@@ -71,7 +83,60 @@ struct CreateDynamicCertificateInput {
     bool isPublic;
     address payoutAddress;
     uint256 publicationFee;
+    uint16 defaultValidityMonths;
     address[] authorizedSheikhs;
+}
+
+struct PrayerLocationInput {
+    string name;
+    PrayerLocationType locationType;
+    string geoReference;
+    bool sufiFriendly;
+    string sufiOrder;
+}
+
+struct PrayerLocation {
+    uint256 id;
+    string name;
+    PrayerLocationType locationType;
+    string geoReference;
+    bool sufiFriendly;
+    string sufiOrder;
+    uint256 createdAt;
+    address createdBy;
+    bool exists;
+}
+
+struct PrayerLocationView {
+    PrayerLocation core;
+    address[] sheikhs;
+    uint256 memberCount;
+}
+
+struct LocationMembership {
+    uint256 locationId;
+    uint256 joinedAt;
+    address addedBy;
+}
+
+struct ManageLocationRequest {
+    bool createNewLocation;
+    uint256 existingLocationId;
+    PrayerLocationInput locationInput;
+}
+
+enum DonationBeneficiaryType {
+    INDIVIDUO,
+    MESQUITA,
+    SHEIK
+}
+
+struct DonationPayload {
+    DonationBeneficiaryType beneficiaryType;
+    address beneficiaryAddress;
+    uint256 locationId;
+    bool isZakat;
+    uint256 amount;
 }
 
 interface IIslamicPassportEvents {
@@ -139,6 +204,21 @@ interface IIslamicPassportEvents {
         address indexed payer,
         uint256 amount,
         address payout,
+        string emojiLog
+    );
+
+    event SufiCertified(
+        uint256 indexed credentialId,
+        address indexed issuer,
+        address indexed subject,
+        string emojiLog
+    );
+
+    event DonationRegistered(
+        uint256 indexed credentialId,
+        address indexed donor,
+        uint256 amount,
+        string note,
         string emojiLog
     );
 }

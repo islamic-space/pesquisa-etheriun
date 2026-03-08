@@ -196,6 +196,9 @@
     <button data-tab="tabSheikhs">Sheiks</button>
     <button data-tab="tabAttest">Atestar / Promover</button>
     <button data-tab="tabDynamic" id="tabDynamicButton" class="hidden">Certificados Dinâmicos</button>
+    <button data-tab="tabLocations">Gestão de Locais</button>
+    <button data-tab="tabAdmin" id="tabAdminButton" class="hidden">Admin</button>
+    <button data-tab="tabDonation">Zakat/Sadaqah</button>
     <button data-tab="tabRequest">Solicitar Atesto</button>
   </nav>
 
@@ -522,6 +525,207 @@
       </div>
     </section>
 
+    <!-- ══════════════════════════════════════ TAB: Gestão de Locais ══════════════════════════════════════ -->
+    <section id="tabLocations" class="tab-panel">
+      <div class="card">
+        <h2>Gestão de Locais de Oração</h2>
+        <p class="tab-description">Admins e sheiks podem gerenciar mesquitas, musallahs e zawiyyas. Sheikh associado a um local pode aprovar pedidos de filiação.</p>
+        <form id="formLocationCreate" autocomplete="off">
+          <div class="form-group">
+            <label>Nome do local</label>
+            <input type="text" id="locName" placeholder="Ex: Mesquita Central de São Paulo" required />
+          </div>
+          <div class="form-group">
+            <label>Tipo</label>
+            <select id="locType" required>
+              <option value="0">Mesquita</option>
+              <option value="1">Musallah</option>
+              <option value="2">Zawiya</option>
+              <option value="3">Outro</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Referência geográfica</label>
+            <input type="text" id="locGeo" placeholder="Ex: 23.5505,-46.6333 ou endereço" />
+          </div>
+          <div class="form-group">
+            <label>Ordem Sufi (opcional)</label>
+            <select id="locSufiOrder">
+              <option value="">Nenhuma</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="locSufiFriendly" />
+              Amigável a sufis
+            </label>
+          </div>
+          <button type="submit" class="btn btn-primary">Criar/Atualizar Local</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Locais Cadastrados</h3>
+        <button class="btn btn-sm btn-accent" id="btnRefreshLocations">Atualizar Lista</button>
+        <table class="mt-2">
+          <thead><tr><th>ID</th><th>Nome</th><th>Tipo</th><th>Sheikhs</th><th>Membros</th><th>Ações</th></tr></thead>
+          <tbody id="locationsTableBody">
+            <tr><td colspan="6" style="color:var(--text-secondary);">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>Gerenciar Sheikh de Local</h3>
+        <form id="formAssignSheikh" autocomplete="off">
+          <div class="form-group">
+            <label>Sheikh (endereço)</label>
+            <input type="text" id="assignSheikhAddr" placeholder="0x..." required />
+          </div>
+          <div class="form-group">
+            <label>Local (ID)</label>
+            <input type="number" id="assignLocationId" placeholder="1" min="1" required />
+          </div>
+          <button type="submit" class="btn btn-primary">Associar Sheikh ao Local</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Pedidos de Filiação</h3>
+        <table>
+          <thead><tr><th>Solicitante</th><th>Local</th><th>Data</th><th>Ações</th></tr></thead>
+          <tbody id="membershipRequestsBody">
+            <tr><td colspan="4" style="color:var(--text-secondary);">Nenhum pedido.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Admin ══════════════════════════════════════ -->
+    <section id="tabAdmin" class="tab-panel">
+      <div class="card">
+        <h2>Painel Administrativo</h2>
+        <p class="tab-description">Funções restritas a SuperAdmins e Sheiks: gerenciar usuários, promover sheiks e emitir certificados especiais.</p>
+
+        <div class="subframe">
+          <h3>Promover a Sheikh</h3>
+          <form id="formPromoteSheikh" autocomplete="off">
+            <div class="form-group">
+              <label>Endereço do futuro Sheikh</label>
+              <input type="text" id="promoteSubject" placeholder="0x..." required />
+            </div>
+            <div class="form-group">
+              <label>Reivindicação (hash)</label>
+              <input type="text" id="promoteClaimHash" placeholder="0x..." />
+            </div>
+            <div class="form-group">
+              <label>URI (opcional)</label>
+              <input type="text" id="promoteUri" placeholder="ipfs://..." />
+            </div>
+            <div class="form-group">
+              <label>Local para associar (opcional)</label>
+              <input type="number" id="promoteLocationId" placeholder="ID do local" min="0" />
+            </div>
+            <button type="submit" class="btn btn-primary">Promover a Sheikh</button>
+          </form>
+        </div>
+
+        <div class="subframe">
+          <h3>Emitir Certificado Sufi</h3>
+          <form id="formIssueSufi" autocomplete="off">
+            <div class="form-group">
+              <label>Destinatário</label>
+              <input type="text" id="sufiSubject" placeholder="0x..." required />
+            </div>
+            <div class="form-group">
+              <label>Reivindicação (hash)</label>
+              <input type="text" id="sufiClaimHash" placeholder="0x..." required />
+            </div>
+            <div class="form-group">
+              <label>URI (opcional)</label>
+              <input type="text" id="sufiUri" placeholder="ipfs://..." />
+            </div>
+            <button type="submit" class="btn btn-accent">Emitir Sufi</button>
+          </form>
+        </div>
+
+        <div class="subframe">
+          <h3>Transferir Sheikh entre Locais</h3>
+          <form id="formTransferSheikh" autocomplete="off">
+            <div class="form-group">
+              <label>Sheikh (endereço)</label>
+              <input type="text" id="transferSheikhAddr" placeholder="0x..." required />
+            </div>
+            <div class="form-group">
+              <label>Local de destino (ID)</label>
+              <input type="number" id="transferTargetLocationId" placeholder="1" min="1" required />
+            </div>
+            <button type="submit" class="btn btn-primary">Transferir</button>
+          </form>
+        </div>
+
+        <div class="subframe">
+          <h3>Remover Sheikh de Local</h3>
+          <form id="formRemoveSheikhFromLocation" autocomplete="off">
+            <div class="form-group">
+              <label>Sheikh (endereço)</label>
+              <input type="text" id="removeSheikhAddr" placeholder="0x..." required />
+            </div>
+            <button type="submit" class="btn btn-danger">Remover Sheikh</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Zakat/Sadaqah ══════════════════════════════════════ -->
+    <section id="tabDonation" class="tab-panel">
+      <div class="card">
+        <h2>Doar Zakat ou Sadaqah</h2>
+        <p class="tab-description">Envie doações diretamente para mesquitas, sheikhs ou contas específicas. Um certificado de doação será emitido on-chain.</p>
+        <form id="formDonate" autocomplete="off">
+          <div class="form-group">
+            <label>Valor (ETH)</label>
+            <input type="number" id="donateAmount" step="0.001" min="0.001" placeholder="0.1" required />
+          </div>
+          <div class="form-group">
+            <label>Tipo de beneficiário</label>
+            <select id="donateBeneficiaryType" required>
+              <option value="0">Mesquita (local)</option>
+              <option value="1">Endereço específico</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Local (ID, se Mesquita)</label>
+            <input type="number" id="donateLocationId" placeholder="1" min="1" />
+          </div>
+          <div class="form-group">
+            <label>Endereço do beneficiário (se específico)</label>
+            <input type="text" id="donateBeneficiaryAddr" placeholder="0x..." />
+          </div>
+          <div class="form-group">
+            <label>Mensagem/nota (opcional)</label>
+            <textarea id="donateNote" rows="3" placeholder="Sua intenção ou observação"></textarea>
+          </div>
+          <div class="form-group">
+            <label>URI off-chain (opcional)</label>
+            <input type="text" id="donateUri" placeholder="ipfs://..." />
+          </div>
+          <button type="submit" class="btn btn-primary">Doar Agora</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Minhas Doações</h3>
+        <button class="btn btn-sm btn-accent" id="btnRefreshDonations">Atualizar</button>
+        <table class="mt-2">
+          <thead><tr><th>ID</th><th>Valor (ETH)</th><th>Beneficiário</th><th>Nota</th><th>Data</th></tr></thead>
+          <tbody id="donationsTableBody">
+            <tr><td colspan="5" style="color:var(--text-secondary);">Nenhuma doação registrada.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ══════════════════════════════════════ TAB: Solicitar Atesto ══════════════════════════════════════ -->
     <section id="tabRequest" class="tab-panel">
       <div class="card">
@@ -561,9 +765,10 @@
 
   <!-- ═══════════ Scripts ═══════════ -->
   <!-- ethers.js v6 via CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <script src="https://cdn.ethers.io/lib/ethers-5.7.2.umd.min.js"></script>
   <script src="web3Client.js"></script>
   <script src="app.js"></script>
+  <script src="app-locations.js"></script>
 
 </body>
 </html>

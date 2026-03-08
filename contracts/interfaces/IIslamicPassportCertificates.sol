@@ -11,9 +11,12 @@ interface IIslamicPassportCertificates {
     function totalCredentials() external view returns (uint256);
     function getCredentialsOf(address user) external view returns (uint256[] memory);
     function getCredential(uint256 id) external view returns (Credential memory);
+    function getIssuanceOrder() external view returns (uint256[] memory);
+    function getRevocationOrder() external view returns (uint256[] memory);
     function listSheikhs() external view returns (address[] memory);
     function hasActiveMuslimAttestation(address user) external view returns (bool);
     function hasActiveSheikhCertificate(address user) external view returns (bool);
+    function hasActiveSufiCertificate(address user) external view returns (bool);
     function isSheikh(address user) external view returns (bool);
     function totalDynamicCertificateTypes() external view returns (uint256);
     function listDynamicCertificateTypes() external view returns (DynamicCertificateType[] memory);
@@ -24,18 +27,21 @@ interface IIslamicPassportCertificates {
     function getActiveDynamicCredential(address subject, uint256 typeId) external view returns (uint256);
 
     // --- Credential issuance ---
-    function issueInitialCredential(address subject, string calldata optionalUri) external returns (uint256);
+    function issueInitialCredential(address subject, string calldata optionalUri, uint16 validityMonths) external returns (uint256);
     function attestMuslim(
         address issuer,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 validityMonths
     ) external returns (uint256);
     function promoteToSheikh(
         address issuer,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 muslimValidityMonths,
+        uint16 sheikhValidityMonths
     ) external returns (uint256 muslimCredId, uint256 sheikhCredId);
     function revokeCredential(
         address caller,
@@ -58,9 +64,27 @@ interface IIslamicPassportCertificates {
         uint256 typeId,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 validityMonths
     ) external returns (uint256 credId);
     function payDynamicCredentialPublication(address payer, uint256 credentialId) external payable;
+
+    // --- Specialized certificates ---
+    function issueSufiCertificate(
+        address issuer,
+        address subject,
+        bytes32 claimHash,
+        string calldata optionalUri,
+        uint16 validityMonths
+    ) external returns (uint256 credId);
+
+    function issueDonationCertificate(
+        address issuer,
+        address subject,
+        bytes32 claimHash,
+        string calldata optionalUri,
+        uint16 validityMonths
+    ) external returns (uint256 credId);
 
     // --- Legacy migration helpers ---
     function importLegacyCredential(Credential memory cred) external;

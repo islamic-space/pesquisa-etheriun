@@ -38,6 +38,7 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
     error IslamicPassportCertificates__UnauthorizedDynamicIssuer(address caller, uint256 typeId);
     error IslamicPassportCertificates__MuslimAttestationRequired(address subject);
     error IslamicPassportCertificates__ActiveSheikhRequired(address subject);
+    error IslamicPassportCertificates__SufiAlreadyCertified(address subject);
     error IslamicPassportCertificates__UnknownPrerequisite(uint256 typeId);
     error IslamicPassportCertificates__MissingPrerequisite(uint256 typeId);
     error IslamicPassportCertificates__PrerequisiteCantReferenceSelf(uint256 typeId);
@@ -134,10 +135,13 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
 
     mapping(uint256 => Credential) private _credentials;
     mapping(address => uint256[]) private _userCredentials;
+    uint256[] private _issuanceOrder;
+    uint256[] private _revocationOrder;
     address[] private _sheikhs;
     mapping(address => bool) private _isSheikh;
     mapping(address => uint256) private _activeMuslimAttestations;
     mapping(address => uint256) private _activeSheikhCertificates;
+    mapping(address => uint256) private _activeSufiCertificates;
     bool private _firstSheikhAssigned;
 
     mapping(uint256 => DynamicCertificateType) private _dynamicCertificateTypes;
@@ -191,12 +195,24 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         return _sheikhs;
     }
 
+    function getIssuanceOrder() external view returns (uint256[] memory) {
+        return _issuanceOrder;
+    }
+
+    function getRevocationOrder() external view returns (uint256[] memory) {
+        return _revocationOrder;
+    }
+
     function hasActiveMuslimAttestation(address user) external view returns (bool) {
         return _activeMuslimAttestations[user] > 0;
     }
 
     function hasActiveSheikhCertificate(address user) external view returns (bool) {
         return _activeSheikhCertificates[user] > 0;
+    }
+
+    function hasActiveSufiCertificate(address user) external view returns (bool) {
+        return _activeSufiCertificates[user] > 0;
     }
 
     function isSheikh(address user) external view returns (bool) {
@@ -262,15 +278,20 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
 
     // ======== FACADE-ONLY OPERATIONS ========
 
-    function issueInitialCredential(address subject, string calldata optionalUri) external onlyFacade returns (uint256) {
-        return _issueCredential(CredentialType.INITIAL, facade, subject, bytes32(0), optionalUri);
+    function issueInitialCredential(address subject, string calldata optionalUri, uint16 validityMonths)
+        external
+        onlyFacade
+        returns (uint256)
+    {
+        return _issueCredential(CredentialType.INITIAL, facade, subject, bytes32(0), optionalUri, validityMonths);
     }
 
     function attestMuslim(
         address issuer,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 validityMonths
     ) external onlyFacade returns (uint256) {
         if (!_facadeContract.profileExists(subject)) {
             revert IslamicPassportCertificates__ProfileMissing(subject);
@@ -278,7 +299,14 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         if (!_facadeContract.canActAsAttestedSheikh(issuer)) {
             revert IslamicPassportCertificates__InactiveAttestingSheikh(issuer);
         }
-        uint256 credId = _issueCredential(CredentialType.MUSLIM_ATTESTATION, issuer, subject, claimHash, optionalUri);
+        uint256 credId = _issueCredential(
+            CredentialType.MUSLIM_ATTESTATION,
+            issuer,
+            subject,
+            claimHash,
+            optionalUri,
+            validityMonths
+        );
         emit AttestedMuslim(issuer, subject, credId);
         return credId;
     }
@@ -287,7 +315,9 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         address issuer,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 muslimValidityMonths,
+        uint16 sheikhValidityMonths
     ) external onlyFacade returns (uint256 muslimCredId, uint256 sheikhCredId) {
         if (!_facadeContract.profileExists(subject)) {
             revert IslamicPassportCertificates__ProfileMissing(subject);
@@ -307,7 +337,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
                 issuer,
                 subject,
                 bytes32(0),
-                ""
+                "",
+                muslimValidityMonths
             );
             emit AttestedMuslim(issuer, subject, muslimCredId);
         }
@@ -316,7 +347,14 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         _addSheikh(subject);
         _facadeContract.notifySheikhPromotion(subject);
 
-        sheikhCredId = _issueCredential(CredentialType.SHEIK_CERTIFICATE, issuer, subject, claimHash, optionalUri);
+        sheikhCredId = _issueCredential(
+            CredentialType.SHEIK_CERTIFICATE,
+            issuer,
+            subject,
+            claimHash,
+            optionalUri,
+            sheikhValidityMonths
+        );
 
         if (!_firstSheikhAssigned) {
             _firstSheikhAssigned = true;
@@ -342,6 +380,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         }
 
         cred.revoked = true;
+        cred.revokedAt = block.timestamp;
+        _revocationOrder.push(cred.id);
         subject = cred.subject;
         subjectLostSheikhStatus = _afterCredentialRevoked(cred);
 
@@ -459,7 +499,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         uint256 typeId,
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        uint16 validityMonths
     ) external onlyFacade returns (uint256 credId) {
         DynamicCertificateType storage record = _dynamicCertificateTypes[typeId];
         if (!record.exists) {
@@ -475,12 +516,15 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         _validateDynamicAudience(record, subject);
         _validateDynamicPrerequisites(record, subject);
 
+        uint16 effectiveValidity = validityMonths != 0 ? validityMonths : record.defaultValidityMonths;
+
         credId = _issueCredential(
             CredentialType.DYNAMIC_CERTIFICATE,
             caller,
             subject,
             claimHash,
-            optionalUri
+            optionalUri,
+            effectiveValidity
         );
 
         _credentialDynamicType[credId] = typeId;
@@ -550,9 +594,58 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         );
     }
 
+    function issueSufiCertificate(
+        address issuer,
+        address subject,
+        bytes32 claimHash,
+        string calldata optionalUri,
+        uint16 validityMonths
+    ) external onlyFacade returns (uint256 credId) {
+        if (!_facadeContract.profileExists(subject)) {
+            revert IslamicPassportCertificates__ProfileMissing(subject);
+        }
+        bool issuerIsSuperAdmin = _facadeContract.hasRole(SUPER_ADMIN_ROLE, issuer);
+        if (!(issuerIsSuperAdmin || _facadeContract.canActAsAttestedSheikh(issuer))) {
+            revert IslamicPassportCertificates__UnauthorizedPromotion(issuer);
+        }
+        if (!_hasActiveMuslimAttestation(subject)) {
+            revert IslamicPassportCertificates__MuslimAttestationRequired(subject);
+        }
+        if (_activeSufiCertificates[subject] != 0) {
+            revert IslamicPassportCertificates__SufiAlreadyCertified(subject);
+        }
+
+        credId = _issueCredential(CredentialType.SUFI_CERTIFICATE, issuer, subject, claimHash, optionalUri, validityMonths);
+        _activeSufiCertificates[subject] = credId;
+    }
+
+    function issueDonationCertificate(
+        address issuer,
+        address subject,
+        bytes32 claimHash,
+        string calldata optionalUri,
+        uint16 validityMonths
+    ) external onlyFacade returns (uint256 credId) {
+        if (!_facadeContract.profileExists(subject)) {
+            revert IslamicPassportCertificates__ProfileMissing(subject);
+        }
+        credId = _issueCredential(
+            CredentialType.DONATION_CERTIFICATE,
+            issuer,
+            subject,
+            claimHash,
+            optionalUri,
+            validityMonths
+        );
+    }
+
     function importLegacyCredential(Credential memory cred) external onlyFacade {
         _credentials[cred.id] = cred;
         _userCredentials[cred.subject].push(cred.id);
+        _issuanceOrder.push(cred.id);
+        if (cred.revoked) {
+            _revocationOrder.push(cred.id);
+        }
         if (cred.id >= _nextCredentialId) {
             _nextCredentialId = cred.id + 1;
         }
@@ -579,7 +672,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
         address issuer,
         address subject,
         bytes32 claimHash,
-        string memory uri
+        string memory uri,
+        uint16 validityMonths
     ) internal returns (uint256) {
         if (credType == CredentialType.INITIAL && issuer != facade) {
             revert IslamicPassportCertificates__InitialCredentialRestricted();
@@ -595,8 +689,12 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
             claimHash: claimHash,
             uri: uri,
             issuedAt: block.timestamp,
-            revoked: false
+            validityMonths: validityMonths,
+            revoked: false,
+            revokedAt: 0
         });
+
+        _issuanceOrder.push(credId);
 
         _userCredentials[subject].push(credId);
 
@@ -604,6 +702,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
             _activeMuslimAttestations[subject] += 1;
         } else if (credType == CredentialType.SHEIK_CERTIFICATE) {
             _activeSheikhCertificates[subject] += 1;
+        } else if (credType == CredentialType.SUFI_CERTIFICATE) {
+            _activeSufiCertificates[subject] = credId;
         }
 
         emit CredentialIssued(credId, credType, issuer, subject, claimHash, uri);
@@ -633,6 +733,10 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
             uint256 typeId = _credentialDynamicType[cred.id];
             if (typeId != 0 && _activeDynamicCertificates[cred.subject][typeId] == cred.id) {
                 _activeDynamicCertificates[cred.subject][typeId] = 0;
+            }
+        } else if (cred.credType == CredentialType.SUFI_CERTIFICATE) {
+            if (_activeSufiCertificates[cred.subject] == cred.id) {
+                _activeSufiCertificates[cred.subject] = 0;
             }
         }
     }
@@ -852,6 +956,8 @@ contract IslamicPassportCertificates is IIslamicPassportCertificates {
                     _activeSheikhCertificates[cred.subject] += 1;
                     _addSheikh(cred.subject);
                     _firstSheikhAssigned = true;
+                } else if (cred.credType == CredentialType.SUFI_CERTIFICATE) {
+                    _activeSufiCertificates[cred.subject] = cred.id;
                 }
             }
 

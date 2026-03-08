@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import {IIslamicPassportCertificates} from "./interfaces/IIslamicPassportCertificates.sol";
+import {IIslamicPrayerRegistry} from "./interfaces/IIslamicPrayerRegistry.sol";
 import {IIslamicPassportFacade} from "./interfaces/IIslamicPassportFacade.sol";
 import {IslamicPassportStringLib} from "./libraries/IslamicPassportStringLib.sol";
 import {
@@ -13,6 +14,11 @@ import {
     DynamicAudienceRule,
     DynamicCertificateCategory,
     CreateDynamicCertificateInput,
+    PrayerLocation,
+    PrayerLocationView,
+    ManageLocationRequest,
+    LocationMembership,
+    DonationPayload,
     IIslamicPassportEvents
 } from "./types/IslamicPassportDataTypes.sol";
 
@@ -82,6 +88,9 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
 
     address private _superAdmin;
     IIslamicPassportCertificates public certificates;
+    IIslamicPrayerRegistry public prayerRegistry;
+
+    uint16 private constant PERPETUAL_VALIDITY = 0;
 
     string private constant _CONTRACT_NAME = "IslamicPassport";
     string private constant _CONTRACT_VERSION = "2.1.0";
@@ -90,10 +99,16 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
         "[{\"name\":\"Carlos Delfino\",\"email\":\"consultoria@carlosdelfino.eti.br\",\"eth\":\"0x841B788FFcbAdFabc5E8A2CfcBbeC93179B9ABef\",\"sol\":\"DMpnSvYmUfjrEkc5ZaFFEJTqKhyoATcAHBGgWZzucf9j\"}]";
 
 
-    constructor(address legacyAddress, address certificatesAddress) {
+    event PrayerRegistryBound(address indexed registry, string emojiLog);
+
+    constructor(address legacyAddress, address certificatesAddress, address prayerRegistryAddress) {
         require(certificatesAddress != address(0), unicode"🚫 IslamicPassport: gestor de certificados invalido");
+        require(prayerRegistryAddress != address(0), unicode"🚫 IslamicPassport: registro de oracao invalido");
         certificates = IIslamicPassportCertificates(certificatesAddress);
         certificates.bindFacade(address(this));
+        prayerRegistry = IIslamicPrayerRegistry(prayerRegistryAddress);
+        prayerRegistry.bindFacade(address(this));
+        emit PrayerRegistryBound(prayerRegistryAddress, unicode"🕌 Registro de oracao ligado a fachada");
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         deployChainId = block.chainid;
@@ -128,7 +143,7 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
 
         emit ProfileRegistered(msg.sender, userId, hNomeOficial, hNomeMuculmano, hMesquita, optionalUri);
 
-        uint256 credentialId = certificates.issueInitialCredential(msg.sender, optionalUri);
+        uint256 credentialId = certificates.issueInitialCredential(msg.sender, optionalUri, PERPETUAL_VALIDITY);
         emit CredentialIssued(credentialId, CredentialType.INITIAL, address(this), msg.sender, bytes32(0), optionalUri);
 
         if (userId == 1 && _superAdmin == address(0)) {
@@ -142,7 +157,7 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
         bytes32 claimHash,
         string calldata optionalUri
     ) external onlyRole(SHEIK_ROLE) {
-        uint256 credId = certificates.attestMuslim(msg.sender, subject, claimHash, optionalUri);
+        uint256 credId = certificates.attestMuslim(msg.sender, subject, claimHash, optionalUri, PERPETUAL_VALIDITY);
         emit CredentialIssued(credId, CredentialType.MUSLIM_ATTESTATION, msg.sender, subject, claimHash, optionalUri);
         emit AttestedMuslim(msg.sender, subject, credId);
     }
@@ -150,13 +165,16 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
     function promoteToSheikh(
         address subject,
         bytes32 claimHash,
-        string calldata optionalUri
+        string calldata optionalUri,
+        ManageLocationRequest calldata locationRequest
     ) external {
         (uint256 muslimCredId, uint256 sheikhCredId) = certificates.promoteToSheikh(
             msg.sender,
             subject,
             claimHash,
-            optionalUri
+            optionalUri,
+            PERPETUAL_VALIDITY,
+            PERPETUAL_VALIDITY
         );
 
         if (muslimCredId > 0) {
@@ -166,6 +184,8 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
 
         emit CredentialIssued(sheikhCredId, CredentialType.SHEIK_CERTIFICATE, msg.sender, subject, claimHash, optionalUri);
         emit SheikhPromoted(msg.sender, subject, sheikhCredId);
+
+        prayerRegistry.assignSheikhToLocation(msg.sender, subject, locationRequest);
     }
 
     function revokeCredential(uint256 credentialId) external {
@@ -369,7 +389,14 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
     ) external returns (uint256) {
         require(_profiles[subject].exists, unicode"🪪 IslamicPassport: perfil nao encontrado");
 
-        uint256 credId = certificates.issueDynamicCertificate(msg.sender, typeId, subject, claimHash, optionalUri);
+        uint256 credId = certificates.issueDynamicCertificate(
+            msg.sender,
+            typeId,
+            subject,
+            claimHash,
+            optionalUri,
+            0
+        );
         emit DynamicCertificateIssued(credId, typeId, subject, msg.sender, unicode"🌙 Certificado dinamico emitido");
 
         return credId;
@@ -382,6 +409,133 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
         Credential memory cred = certificates.getCredential(credentialId);
         address payout = status.payoutAddress != address(0) ? status.payoutAddress : cred.issuer;
         emit DynamicCredentialPublicationPaid(credentialId, msg.sender, msg.value, payout, unicode"💎 Taxa de publicacao quitada");
+    }
+
+    // ======== PRAYER REGISTRY INTEGRATION ========
+
+    function listPrayerLocationIds() external view returns (uint256[] memory) {
+        return prayerRegistry.listLocationIds();
+    }
+
+    function getPrayerLocation(uint256 locationId) external view returns (PrayerLocationView memory) {
+        return prayerRegistry.getLocation(locationId);
+    }
+
+    function getPrayerLocationCore(uint256 locationId) external view returns (PrayerLocation memory) {
+        return prayerRegistry.getLocationCore(locationId);
+    }
+
+    function getPrayerLocationSheikhs(uint256 locationId) external view returns (address[] memory) {
+        return prayerRegistry.getLocationSheikhs(locationId);
+    }
+
+    function getSheikhPrayerLocation(address sheikh) external view returns (uint256) {
+        return prayerRegistry.getSheikhLocation(sheikh);
+    }
+
+    function getMemberPrayerLocation(address member) external view returns (LocationMembership memory) {
+        return prayerRegistry.getMemberLocation(member);
+    }
+
+    function hasPendingPrayerRequest(address member) external view returns (bool) {
+        return prayerRegistry.hasPendingMembershipRequest(member);
+    }
+
+    function managePrayerLocation(ManageLocationRequest calldata request) external returns (uint256 locationId) {
+        require(_canManagePrayerLocations(msg.sender), unicode"🔐 IslamicPassport: somente Admin ou Sheikh");
+        locationId = prayerRegistry.upsertLocation(msg.sender, request);
+    }
+
+    function transferSheikhToLocation(address sheikh, uint256 targetLocationId) external onlyRole(SUPER_ADMIN_ROLE) {
+        prayerRegistry.transferSheikh(msg.sender, sheikh, targetLocationId);
+    }
+
+    function removeSheikhFromLocation(address sheikh) external onlyRole(SUPER_ADMIN_ROLE) {
+        prayerRegistry.removeSheikhFromLocation(msg.sender, sheikh);
+    }
+
+    function requestPrayerLocationMembership(uint256 locationId) external {
+        _requireProfileExists(msg.sender);
+        prayerRegistry.submitMembershipRequest(msg.sender, locationId);
+    }
+
+    function cancelPrayerLocationMembershipRequest(uint256 locationId) external {
+        prayerRegistry.cancelMembershipRequest(msg.sender);
+    }
+
+    function approvePrayerLocationMembership(address requester, uint256 locationId) external onlyRole(SHEIK_ROLE) {
+        LocationMembership memory membershipSnapshot = prayerRegistry.approveMembershipRequest(msg.sender, requester, locationId);
+        _issueMuslimCredentialIfMissing(msg.sender, requester);
+    }
+
+    function grantPrayerLocationMembership(address member, uint256 locationId) external onlyRole(SHEIK_ROLE) {
+        LocationMembership memory membershipSnapshot = prayerRegistry.grantMembership(msg.sender, member, locationId);
+        _issueMuslimCredentialIfMissing(msg.sender, member);
+    }
+
+    function removePrayerLocationMember(address member) external onlyRole(SHEIK_ROLE) {
+        prayerRegistry.removeMember(msg.sender, member);
+    }
+
+    // ======== SUFI & DONATION CERTIFICATES ========
+
+    function requestSufiCertification(address subject, bytes32 claimHash, string calldata optionalUri)
+        external
+        onlyRole(SHEIK_ROLE)
+        returns (uint256 credId)
+    {
+        _requireProfileExists(subject);
+        require(certificates.hasActiveMuslimAttestation(subject), unicode"🕌 IslamicPassport: certificado de Muçulmano necessario");
+        require(!certificates.hasActiveSufiCertificate(subject), unicode"🔁 IslamicPassport: Sufi já emitido");
+        credId = certificates.issueSufiCertificate(msg.sender, subject, claimHash, optionalUri, PERPETUAL_VALIDITY);
+        emit CredentialIssued(credId, CredentialType.SUFI_CERTIFICATE, msg.sender, subject, claimHash, optionalUri);
+        emit SufiCertified(credId, msg.sender, subject, unicode"🌙 Caminho Sufi confirmado");
+    }
+
+    function donateZakatOrSadaqah(
+        DonationPayload calldata payload,
+        string calldata note,
+        bytes32 claimHash,
+        string calldata optionalUri
+    ) external payable returns (uint256 credId) {
+        _requireProfileExists(msg.sender);
+        require(payload.amount == msg.value, unicode"💰 IslamicPassport: valor inconsistente");
+        require(certificates.hasActiveMuslimAttestation(msg.sender), unicode"🕌 IslamicPassport: somente muçulmanos podem doar");
+
+        (uint256 locationId, address beneficiaryWallet) = prayerRegistry.recordDonation(msg.sender, payload, note);
+        (bool sent, ) = beneficiaryWallet.call{value: msg.value}("");
+        require(sent, unicode"💸 IslamicPassport: transferencia da doacao falhou");
+
+        credId = certificates.issueDonationCertificate(
+            msg.sender,
+            msg.sender,
+            claimHash,
+            optionalUri,
+            PERPETUAL_VALIDITY
+        );
+        emit CredentialIssued(credId, CredentialType.DONATION_CERTIFICATE, msg.sender, msg.sender, claimHash, optionalUri);
+        emit DonationRegistered(credId, msg.sender, msg.value, note, unicode"🎁 Doacao registrada");
+
+        // locationId is emitted indirectly; UI pode usar DonationRegistered + PrayerRegistry events
+    }
+
+    // ======== INTERNAL HELPERS ========
+
+    function _requireProfileExists(address user) internal view {
+        require(_profiles[user].exists, unicode"🪪 IslamicPassport: perfil inexistente");
+    }
+
+    function _issueMuslimCredentialIfMissing(address issuer, address subject) internal {
+        if (certificates.hasActiveMuslimAttestation(subject)) {
+            return;
+        }
+        uint256 credId = certificates.attestMuslim(issuer, subject, bytes32(0), "", PERPETUAL_VALIDITY);
+        emit CredentialIssued(credId, CredentialType.MUSLIM_ATTESTATION, issuer, subject, bytes32(0), "");
+        emit AttestedMuslim(issuer, subject, credId);
+    }
+
+    function _canManagePrayerLocations(address operator) internal view returns (bool) {
+        return hasRole(SUPER_ADMIN_ROLE, operator) || hasRole(SHEIK_ROLE, operator);
     }
 
     function _migrateFromLegacy(address legacyAddress) internal {
@@ -422,7 +576,9 @@ contract IslamicPassportV2 is AccessControl, IIslamicPassportFacade, IIslamicPas
                         claimHash: claimHash,
                         uri: uri,
                         issuedAt: issuedAt,
-                        revoked: revoked
+                        validityMonths: 0,
+                        revoked: revoked,
+                        revokedAt: revoked ? issuedAt : 0
                     })
                 );
             }

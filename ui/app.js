@@ -7,7 +7,7 @@
  */
 
 // ═══════════════════════════════════════════════════════════
-//  ABI mínima do contrato IslamicPassport
+//  ABI mínima do contrato IslamicPassport (incluindo PrayerRegistry)
 // ═══════════════════════════════════════════════════════════
 
 const CONTRACT_ABI = [
@@ -20,6 +20,18 @@ const CONTRACT_ABI = [
   "function updateDynamicCertificateType(uint256 typeId,(string name,string description,uint8 audienceRule,uint256[] prerequisiteTypeIds,uint8 category,bool isPublic,address payoutAddress,uint256 publicationFee,address[] authorizedSheikhs) input) external",
   "function issueDynamicCertificate(uint256 typeId,address subject,bytes32 claimHash,string optionalUri) external returns (uint256)",
   "function payDynamicCredentialPublication(uint256 credentialId) external payable",
+
+  // ── Prayer Registry (escrita) ──
+  "function managePrayerLocation((bool createNewLocation, uint256 existingLocationId, (string name, uint8 locationType, string geoReference, bool sufiFriendly, string sufiOrder) locationInput)) external returns (uint256 locationId)",
+  "function assignSheikhToLocation(address sheikh, (bool createNewLocation, uint256 existingLocationId, (string name, uint8 locationType, string geoReference, bool sufiFriendly, string sufiOrder) locationInput)) external",
+  "function transferSheikhToLocation(address sheikh, uint256 targetLocationId) external",
+  "function removeSheikhFromLocation(address sheikh) external",
+  "function requestPrayerLocationMembership(uint256 locationId) external",
+  "function cancelPrayerLocationMembershipRequest(uint256 locationId) external",
+  "function approvePrayerLocationMembership(address requester, uint256 locationId) external",
+  "function grantPrayerLocationMembership(address member, uint256 locationId) external",
+  "function removePrayerLocationMember(address member) external",
+  "function donateZakatOrSadaqah((uint256 amount, uint8 beneficiaryType, uint256 locationId, address beneficiaryAddress) payload, string note, bytes32 claimHash, string optionalUri) external payable",
 
   // ── Leitura ──
   "function getDID(address user) view returns (string)",
@@ -41,6 +53,15 @@ const CONTRACT_ABI = [
   "function getDynamicCredentialStatus(uint256 credentialId) view returns (uint256 typeId, bool published, uint256 publicationFee, address payoutAddress, uint256 paidAmount)",
   "function getActiveDynamicCredential(address subject, uint256 typeId) view returns (uint256)",
 
+  // ── Prayer Registry (leitura) ──
+  "function listPrayerLocationIds() view returns (uint256[])",
+  "function getPrayerLocation(uint256 locationId) view returns ((uint256 id, string name, uint8 locationType, string geoReference, bool sufiFriendly, string sufiOrder, uint256 createdAt, address createdBy, bool exists) core, address[] sheikhs, uint256 memberCount)",
+  "function getPrayerLocationCore(uint256 locationId) view returns (uint256 id, string name, uint8 locationType, string geoReference, bool sufiFriendly, string sufiOrder, uint256 createdAt, address createdBy, bool exists)",
+  "function getPrayerLocationSheikhs(uint256 locationId) view returns (address[])",
+  "function getSheikhPrayerLocation(address sheikh) view returns (uint256)",
+  "function getMemberPrayerLocation(address member) view returns ((uint256 locationId, uint256 joinedAt, address addedBy))",
+  "function hasPendingPrayerRequest(address member) view returns (bool)",
+
   // ── Eventos ──
   "event ProfileRegistered(address indexed user, uint256 indexed userId, bytes32 hNomeOficial, bytes32 hNomeMuculmano, bytes32 hMesquita, string uri)",
   "event CredentialIssued(uint256 indexed credentialId, uint8 credType, address indexed issuer, address indexed subject, bytes32 claimHash, string uri)",
@@ -50,7 +71,19 @@ const CONTRACT_ABI = [
   "event DynamicCertificateTypeCreated(uint256 indexed typeId, bytes32 indexed slug, address indexed createdBy, string name, string emojiLog)",
   "event DynamicCertificateTypeUpdated(uint256 indexed typeId, bytes32 indexed slug, address indexed updatedBy, string name, string emojiLog)",
   "event DynamicCertificateIssued(uint256 indexed credentialId, uint256 indexed typeId, address indexed subject, address issuer, string emojiLog)",
-  "event DynamicCredentialPublicationPaid(uint256 indexed credentialId, address indexed payer, uint256 amount, address payout, string emojiLog)"
+  "event DynamicCredentialPublicationPaid(uint256 indexed credentialId, address indexed payer, uint256 amount, address payout, string emojiLog)",
+
+  // ── Prayer Registry (eventos) ──
+  "event PrayerLocationSaved(uint256 indexed locationId, address indexed operator, string emojiLog)",
+  "event SheikhAssignedToLocation(uint256 indexed locationId, address indexed sheikh, address indexed operator, string emojiLog)",
+  "event SheikhTransferred(uint256 indexed fromLocationId, uint256 indexed toLocationId, address indexed sheikh, string emojiLog)",
+  "event SheikhRemoved(uint256 indexed locationId, address indexed sheikh, address indexed operator, string emojiLog)",
+  "event MembershipRequested(address indexed requester, uint256 indexed locationId, string emojiLog)",
+  "event MembershipCancelled(address indexed requester, uint256 indexed locationId, string emojiLog)",
+  "event MembershipApproved(address indexed requester, uint256 indexed locationId, address indexed operator, string emojiLog)",
+  "event MembershipGranted(address indexed member, uint256 indexed locationId, address indexed operator, string emojiLog)",
+  "event MembershipRemoved(address indexed member, uint256 indexed locationId, address indexed operator, string emojiLog)",
+  "event DonationRecorded(address indexed donor, uint256 indexed locationId, (uint256 amount, uint8 beneficiaryType, uint256 locationId, address beneficiaryAddress) payload, string note, string emojiLog)"
 ];
 
 const dynamicState = {
@@ -150,6 +183,22 @@ const DYNAMIC_AUDIENCE_LABELS = [
 
 const DYNAMIC_CATEGORY_LABELS = ["Palestra", "Curso", "Evento", "Dawa", "Outros"];
 
+const LOCATION_TYPE_LABELS = ["Mesquita", "Musallah", "Zawiya", "Outro"];
+
+const SUFI_ORDERS = [
+  { key: "", label: "Nenhuma" },
+  { key: "Chishti", label: "Chishti" },
+  { key: "Mevlevi", label: "Mevlevi" },
+  { key: "Naqshbandi", label: "Naqshbandi" },
+  { key: "Tijaniyyah", label: "Tijaniyyah" },
+  { key: "Qadiriyya", label: "Qadiriyya" },
+  { key: "Rifa'iyya", label: "Rifa'iyya" },
+  { key: "Shadhiliyya", label: "Shadhiliyya" },
+  { key: "Bektashi", label: "Bektashi" },
+  { key: "Kubrawiya", label: "Kubrawiya" },
+  { key: "Suhrawardiyya", label: "Suhrawardiyya" }
+];
+
 /**
  * Seletores de botões on-chain que devem ser desabilitados quando desconectado.
  */
@@ -161,7 +210,16 @@ const ONCHAIN_BUTTONS_SELECTOR = [
   '#btnRefreshSheikhs',
   '#btnDynamicSubmit',
   '#formDynamicIssue button[type="submit"]',
-  '#btnDynamicPublish'
+  '#btnDynamicPublish',
+  '#formLocationCreate button[type="submit"]',
+  '#btnRefreshLocations',
+  '#formAssignSheikh button[type="submit"]',
+  '#formPromoteSheikh button[type="submit"]',
+  '#formIssueSufi button[type="submit"]',
+  '#formTransferSheikh button[type="submit"]',
+  '#formRemoveSheikhFromLocation button[type="submit"]',
+  '#formDonate button[type="submit"]',
+  '#btnRefreshDonations'
 ].join(",");
 
 /**
@@ -3839,6 +3897,34 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Atualizar sheiks ──
   document.getElementById("btnRefreshSheikhs").addEventListener("click", refreshSheikhs);
+
+  // ── Locais ──
+  document.getElementById("btnRefreshLocations").addEventListener("click", refreshLocations);
+  const formLocationCreate = document.getElementById("formLocationCreate");
+  if (formLocationCreate) formLocationCreate.addEventListener("submit", handleLocationCreate);
+  const formAssignSheikh = document.getElementById("formAssignSheikh");
+  if (formAssignSheikh) formAssignSheikh.addEventListener("submit", handleAssignSheikh);
+
+  // ── Admin ──
+  const formPromoteSheikh = document.getElementById("formPromoteSheikh");
+  if (formPromoteSheikh) formPromoteSheikh.addEventListener("submit", handlePromoteSheikh);
+  const formIssueSufi = document.getElementById("formIssueSufi");
+  if (formIssueSufi) formIssueSufi.addEventListener("submit", handleIssueSufi);
+  const formTransferSheikh = document.getElementById("formTransferSheikh");
+  if (formTransferSheikh) formTransferSheikh.addEventListener("submit", handleTransferSheikh);
+  const formRemoveSheikhFromLocation = document.getElementById("formRemoveSheikhFromLocation");
+  if (formRemoveSheikhFromLocation) formRemoveSheikhFromLocation.addEventListener("submit", handleRemoveSheikhFromLocation);
+
+  // ── Doações ──
+  document.getElementById("btnRefreshDonations").addEventListener("click", refreshDonations);
+  const formDonate = document.getElementById("formDonate");
+  if (formDonate) formDonate.addEventListener("submit", handleDonate);
+
+  // ── UI de permissão ──
+  updatePermissionUI();
+
+  // ── Popular ordens Sufis ──
+  populateSufiOrders();
 
   // ── Certificados dinâmicos ──
   const dynamicTypeSelector = document.getElementById("dynamicTypeSelector");
