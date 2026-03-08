@@ -362,6 +362,8 @@ let defaultAttestationType = "MUSLIM_ATTESTATION";
 
 /** @type {{address: string, did: string}[]} */
 let sheikhDirectory = [];
+const sheikhDirectoryIndex = new Map();
+const sheikhDidIndex = new Map();
 
 // ═══════════════════════════════════════════════════════════
 //  Metadados do contrato (identifyContract)
@@ -758,23 +760,96 @@ function updateSheikhDirectoryList() {
   });
 }
 
+function rebuildSheikhDirectorySnapshot() {
+  sheikhDirectory = Array.from(sheikhDirectoryIndex.values());
+  updateSheikhDirectoryList();
+}
+
+function rememberSheikhIdentity(address, extra = {}, options = {}) {
+  const { silent = false } = options;
+  if (!address) return null;
+  let checksum;
+  try {
+    checksum = ethers.getAddress(address);
+  } catch (_) {
+    checksum = address;
+  }
+  const key = checksum.toLowerCase();
+  const previous = sheikhDirectoryIndex.get(key);
+  if (previous?.did) {
+    sheikhDidIndex.delete(previous.did.toLowerCase());
+  }
+  const updated = {
+    ...previous,
+    address: checksum,
+    ...extra
+  };
+  sheikhDirectoryIndex.set(key, updated);
+  if (updated.did) {
+    sheikhDidIndex.set(updated.did.toLowerCase(), updated);
+  }
+  if (!silent) {
+    rebuildSheikhDirectorySnapshot();
+  }
+  return updated;
+}
+
+function replaceSheikhDirectory(entries) {
+  sheikhDirectoryIndex.clear();
+  sheikhDidIndex.clear();
+  entries.forEach((entry) => {
+    if (!entry?.address) return;
+    rememberSheikhIdentity(entry.address, { did: entry.did || null }, { silent: true });
+  });
+  rebuildSheikhDirectorySnapshot();
+}
+
+function getCachedSheikhIdentity(address) {
+  if (!address) return null;
+  let checksum;
+  try {
+    checksum = ethers.getAddress(address);
+  } catch (_) {
+    return null;
+  }
+  return sheikhDirectoryIndex.get(checksum.toLowerCase()) || null;
+}
+
+async function ensureSheikhIdentity(address, rc) {
+  if (!address) return null;
+  const cached = getCachedSheikhIdentity(address);
+  if (cached && cached.did) {
+    return cached;
+  }
+  if (!rc) {
+    return cached;
+  }
+  try {
+    const did = await rc.getDID(address);
+    const entry = rememberSheikhIdentity(address, { did });
+    console.log(`🕌 [ensureSheikhIdentity] DID registrado para ${shortAddr(entry.address)} → ${did}`);
+    return entry;
+  } catch (err) {
+    console.warn(`⚠️ [ensureSheikhIdentity] Falha ao obter DID do emissor ${address}:`, err.message);
+    return cached || rememberSheikhIdentity(address, {}, { silent: true }) || null;
+  }
+}
+
 function resolveSheikhDirectoryEntry(value) {
   if (!value || typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
-  const entry = sheikhDirectory.find((item) => {
-    return (
-      (item.did && item.did.toLowerCase() === lower) ||
-      item.address.toLowerCase() === lower
-    );
-  });
-  if (entry) return entry;
+  if (sheikhDidIndex.has(lower)) {
+    return sheikhDidIndex.get(lower);
+  }
+  const cached = getCachedSheikhIdentity(trimmed);
+  if (cached) return cached;
   const candidate = extractAddressCandidate(trimmed);
   if (candidate) {
     try {
       const addr = ethers.getAddress(candidate);
-      return { address: addr, did: null };
+      return rememberSheikhIdentity(addr);
     } catch (_) {
       return null;
     }
@@ -826,6 +901,34 @@ function showStatus(msg, type = "info", duration = 5000) {
  */
 function shortAddr(addr) {
   return addr.slice(0, 6) + "..." + addr.slice(-4);
+}
+
+function escapeHtml(str) {
+  if (typeof str !== "string") return str;
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatSheikhIssuerHtml(identity, address, { highlight = false } = {}) {
+  const badge = highlight ? "🕌 " : "";
+  if (!address) {
+    return `${badge}—`;
+  }
+  let checksum = address;
+  try {
+    checksum = ethers.getAddress(address);
+  } catch (_) {}
+  const prettyAddr = shortAddr(checksum);
+  if (!identity) {
+    return `${badge}<span title="${escapeHtml(checksum)}">${escapeHtml(prettyAddr)}</span>`;
+  }
+  const mainLabel = identity.did ? escapeHtml(identity.did) : escapeHtml(prettyAddr);
+  const addrTag = `<span class="text-mono" title="${escapeHtml(checksum)}">${escapeHtml(prettyAddr)}</span>`;
+  return `${badge}<span title="${escapeHtml(identity.did || checksum)}">${mainLabel}</span>${identity.did ? ` ${addrTag}` : ""}`;
 }
 
 /**
@@ -2366,6 +2469,19 @@ async function refreshDashboard(_retries = 0) {
 
         const typeName = CRED_TYPE_NAMES[Number(c[1])] || "UNKNOWN";
         const badgeCls = CRED_BADGE_CLASS[Number(c[1])] || "badge-initial";
+        const credType = Number(c[1]);
+        const issuerAddress = c[2];
+        const highlightIssuer = credType !== 0;
+        let issuerDisplayHtml = "—";
+        const isContractIssuer = issuerAddress && contractAddress && issuerAddress.toLowerCase() === contractAddress.toLowerCase();
+        if (isContractIssuer) {
+          issuerDisplayHtml = "📜 Contrato (auto)";
+        } else if (issuerAddress && highlightIssuer) {
+          const issuerIdentity = await ensureSheikhIdentity(issuerAddress, rcRead);
+          issuerDisplayHtml = formatSheikhIssuerHtml(issuerIdentity, issuerAddress, { highlight: true });
+        } else {
+          issuerDisplayHtml = formatSheikhIssuerHtml(null, issuerAddress, { highlight: false });
+        }
 
         div.innerHTML = `
           <div class="cred-header">
@@ -2374,7 +2490,7 @@ async function refreshDashboard(_retries = 0) {
             <span style="font-size:0.8rem;color:var(--text-secondary);">#${c[0].toString()}</span>
           </div>
           <div class="cred-detail">
-            <strong>Issuer:</strong> ${c[2] === contractAddress ? "Contrato (auto)" : shortAddr(c[2])}<br/>
+            <strong>Emissor:</strong> ${issuerDisplayHtml}<br/>
             <strong>Emitida em:</strong> ${formatTs(c[6])}<br/>
             <strong>ClaimHash:</strong> ${c[4] !== ethers.ZeroHash ? c[4] : "—"}<br/>
             ${c[5] ? `<strong>URI:</strong> ${c[5]}<br/>` : ""}
@@ -2430,25 +2546,36 @@ async function refreshSheikhs() {
 
     if (sheikhs.length === 0) {
       tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-secondary);">Nenhum sheik registrado ainda.</td></tr>';
+      replaceSheikhDirectory([]);
       return;
     }
 
+    const directoryEntries = [];
     for (let i = 0; i < sheikhs.length; i++) {
       const addr = sheikhs[i];
-      let did = "";
-      try { did = await rcSheikhs.getDID(addr); } catch (_) { did = "—"; }
+      let didDisplay = "—";
+      let didValue = null;
+      try {
+        const fetchedDid = await rcSheikhs.getDID(addr);
+        didDisplay = fetchedDid;
+        didValue = fetchedDid;
+      } catch (_) {
+        didDisplay = "—";
+      }
+      directoryEntries.push({ address: addr, did: didValue });
 
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${i + 1}</td>
         <td class="text-mono">${addr}</td>
-        <td class="text-mono" style="font-size:0.75rem;">${did}</td>
+        <td class="text-mono" style="font-size:0.75rem;">${didDisplay}</td>
       `;
       tbody.appendChild(tr);
     }
+    replaceSheikhDirectory(directoryEntries);
 
   } catch (err) {
-    showStatus("Erro ao listar sheiks: " + (err.reason || err.message), "error");
+    showStatus("⚠️ Erro ao listar sheiks: " + (err.reason || err.message), "error");
   }
 }
 

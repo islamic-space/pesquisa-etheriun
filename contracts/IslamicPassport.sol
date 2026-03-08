@@ -208,12 +208,6 @@ contract IslamicPassportV2 is AccessControl {
 
         uint256 muslimCredId = 0;
 
-        if (!_firstSheikhAssigned) {
-            require(hasRole(SUPER_ADMIN_ROLE, msg.sender), "IslamicPassport: apenas SuperAdmin pode nomear o primeiro sheik");
-        } else {
-            require(_canActAsAttestedSheikh(msg.sender), "IslamicPassport: apenas sheik atestado pode promover sheiks");
-        }
-
         if (!_hasActiveMuslimAttestation(subject)) {
             muslimCredId = _issueCredential(
                 CredentialType.MUSLIM_ATTESTATION,
@@ -227,7 +221,6 @@ contract IslamicPassportV2 is AccessControl {
 
         _grantRole(SHEIK_ROLE, subject);
         _addSheikh(subject);
-        _firstSheikhAssigned = true;
 
         uint256 credId = _issueCredential(
             CredentialType.SHEIK_CERTIFICATE,
@@ -236,6 +229,10 @@ contract IslamicPassportV2 is AccessControl {
             claimHash,
             optionalUri
         );
+
+        if (!_firstSheikhAssigned) {
+            _firstSheikhAssigned = true;
+        }
 
         emit SheikhPromoted(msg.sender, subject, credId);
     }
@@ -489,6 +486,10 @@ contract IslamicPassportV2 is AccessControl {
         bytes32 claimHash,
         string memory uri
     ) internal returns (uint256) {
+        if (credType == CredentialType.SHEIK_CERTIFICATE) {
+            _validateSheikhCertificateIssuer(issuer);
+        }
+
         uint256 credId = _nextCredentialId++;
 
         _credentials[credId] = Credential({
@@ -513,6 +514,20 @@ contract IslamicPassportV2 is AccessControl {
         emit CredentialIssued(credId, credType, issuer, subject, claimHash, uri);
 
         return credId;
+    }
+
+    function _validateSheikhCertificateIssuer(address issuer) internal view {
+        if (!_firstSheikhAssigned) {
+            require(
+                hasRole(SUPER_ADMIN_ROLE, issuer),
+                "IslamicPassport: apenas SuperAdmin pode emitir o primeiro certificado de sheik"
+            );
+        } else {
+            require(
+                _canActAsAttestedSheikh(issuer),
+                "IslamicPassport: apenas sheik pode emitir certificado"
+            );
+        }
     }
 
     function _afterCredentialRevoked(Credential storage cred) internal {
