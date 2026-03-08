@@ -195,6 +195,7 @@
     <button data-tab="tabDashboard">Meu Painel</button>
     <button data-tab="tabSheikhs">Sheiks</button>
     <button data-tab="tabAttest">Atestar / Promover</button>
+    <button data-tab="tabDynamic" id="tabDynamicButton" class="hidden">Certificados Dinâmicos</button>
     <button data-tab="tabRequest">Solicitar Atesto</button>
   </nav>
 
@@ -342,6 +343,182 @@
           </div>
           <button type="submit" class="btn btn-danger btn-sm">Revogar</button>
         </form>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════ TAB: Certificados Dinâmicos ══════════════════════════════════════ -->
+    <section id="tabDynamic" class="tab-panel">
+      <div class="card">
+        <h2>Gestão de Certificados Dinâmicos</h2>
+        <p class="tab-description">Apenas admins e sheiks ativos visualizam esta aba. Configure certificados customizados, atribua sheiks emissores e defina condições e taxas de publicação.</p>
+        <form id="formDynamicCreate" autocomplete="off">
+          <div class="subframe-grid">
+            <div class="subframe">
+              <label>Certificado em edição</label>
+              <select id="dynamicTypeSelector">
+                <option value="">Novo certificado</option>
+              </select>
+              <small>Selecione um certificado existente para editar.</small>
+            </div>
+            <div class="subframe">
+              <label>Nome do certificado</label>
+              <input type="text" id="dynamicName" placeholder="Ex: Certificado de Dawa Avançado" required />
+            </div>
+          </div>
+
+          <div class="subframe">
+            <label>Descrição</label>
+            <textarea id="dynamicDescription" rows="3" placeholder="Explique a finalidade do certificado" required></textarea>
+          </div>
+
+          <div class="subframe-grid">
+            <div class="subframe">
+              <label>Categoria</label>
+              <select id="dynamicCategory" required>
+                <option value="0">Palestra</option>
+                <option value="1">Curso</option>
+                <option value="2">Evento em Geral</option>
+                <option value="3">Dawa</option>
+                <option value="4">Outros</option>
+              </select>
+            </div>
+            <div class="subframe">
+              <label>Regra de público</label>
+              <select id="dynamicAudience" required>
+                <option value="0">Qualquer pessoa</option>
+                <option value="1">Somente muçulmanos</option>
+                <option value="2">Somente sheiks</option>
+                <option value="3">Requer outros certificados dinâmicos</option>
+              </select>
+            </div>
+            <div class="subframe">
+              <label>Visibilidade</label>
+              <select id="dynamicVisibility" required>
+                <option value="public">🌐 Público</option>
+                <option value="private">🔒 Privado</option>
+              </select>
+              <small>Defina se o certificado aparece no catálogo público ou fica restrito.</small>
+            </div>
+          </div>
+
+          <div class="subframe">
+            <div class="subframe-title">Pré-requisitos (certificados dinâmicos)</div>
+            <div class="dual-list">
+              <div class="dual-list-column">
+                <label>Disponíveis</label>
+                <input type="text" id="dynamicPrereqFilter" placeholder="Filtrar certificados..." />
+                <select id="dynamicPrereqAvailable" multiple size="7"></select>
+              </div>
+              <div class="dual-list-controls">
+                <button type="button" class="btn btn-sm" id="btnAddPrereq">Adicionar →</button>
+                <button type="button" class="btn btn-sm" id="btnRemovePrereq">← Remover</button>
+              </div>
+              <div class="dual-list-column">
+                <label>Selecionados</label>
+                <input type="text" id="dynamicPrereqSelectedFilter" placeholder="Filtrar selecionados..." />
+                <select id="dynamicPrereqSelected" multiple size="7"></select>
+              </div>
+            </div>
+          </div>
+
+          <div class="subframe">
+            <div class="subframe-title">Sheiks autorizados a emitir</div>
+            <div class="dual-list">
+              <div class="dual-list-column">
+                <label>Sheiks cadastrados</label>
+                <input type="text" id="dynamicSheikhAvailableFilter" placeholder="Filtrar por DID ou endereço..." />
+                <select id="dynamicSheikhAvailable" multiple size="8"></select>
+              </div>
+              <div class="dual-list-controls">
+                <button type="button" class="btn btn-sm" id="btnAddSheikh">Adicionar →</button>
+                <button type="button" class="btn btn-sm" id="btnRemoveSheikh">← Remover</button>
+              </div>
+              <div class="dual-list-column">
+                <label>Sheiks selecionados</label>
+                <input type="text" id="dynamicSheikhSelectedFilter" placeholder="Filtrar selecionados..." />
+                <select id="dynamicSheikhSelected" multiple size="8"></select>
+              </div>
+            </div>
+            <small>O sheik criador é incluído automaticamente se tiver certificado ativo.</small>
+          </div>
+
+          <div class="subframe-grid">
+            <div class="subframe">
+              <label>Conta para receber taxas (opcional)</label>
+              <input type="text" id="dynamicPayout" placeholder="0x..." />
+            </div>
+            <div class="subframe">
+              <label>Taxa de publicação (Gwei)</label>
+              <input type="number" id="dynamicFee" min="0" step="0.0001" placeholder="Ex: 250" />
+              <small>Valor pago pelo certificado para aparecer no histórico público.</small>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="btnDynamicSubmit">Salvar Certificado</button>
+            <button type="button" class="btn btn-sm" id="btnDynamicReset">Limpar</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-header-inline">
+          <h3>Certificados cadastrados</h3>
+          <button class="btn btn-sm btn-accent" type="button" id="btnDynamicReload">Atualizar lista</button>
+        </div>
+        <div id="dynamicTypesList" class="dynamic-type-list">
+          <p class="muted">Nenhum certificado carregado ainda.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Emitir Certificado Dinâmico</h2>
+        <form id="formDynamicIssue" autocomplete="off">
+          <div class="form-group">
+            <label>Tipo de certificado</label>
+            <select id="dynamicIssueType"></select>
+          </div>
+          <div class="form-group">
+            <label>Endereço do destinatário</label>
+            <input type="text" id="dynamicIssueSubject" placeholder="0x..." required />
+          </div>
+          <div class="form-group">
+            <label>JSON do certificado (opcional)</label>
+            <textarea id="dynamicIssueJSON" rows="4" placeholder="Cole aqui o JSON do certificado para automatizar hash e URI"></textarea>
+            <label class="mt-1" style="display:block;font-size:0.85rem;font-weight:500;">
+              Upload de arquivo JSON
+              <input type="file" id="dynamicIssueJsonFile" accept=".json,application/json" />
+            </label>
+            <small style="display:block;margin-top:0.35rem;color:var(--text-secondary);">
+              Quando preenchido, o hash é calculado automaticamente e os campos abaixo são preenchidos.
+            </small>
+          </div>
+          <div class="form-group">
+            <label>URI off-chain (opcional)</label>
+            <input type="text" id="dynamicIssueUri" placeholder="ipfs://..." />
+          </div>
+          <div class="form-group">
+            <label>Notas adicionais (armazenadas on-chain)</label>
+            <textarea id="dynamicIssueNotes" rows="3" placeholder="Observações complementares ou link público"></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary">Emitir Certificado Dinâmico</button>
+        </form>
+        <p id="dynamicIssueHint" class="hint muted">Selecione um certificado para visualizar as regras de emissão.</p>
+      </div>
+
+      <div class="card">
+        <h2>Publicar no Histórico Público</h2>
+        <form id="formDynamicPublish" autocomplete="off">
+          <div class="form-group">
+            <label>ID da credencial dinâmica</label>
+            <div class="input-inline">
+              <input type="number" id="dynamicPublishCredential" placeholder="123" min="1" required />
+              <button type="button" class="btn btn-sm" id="btnDynamicCheckStatus">Consultar status</button>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-accent" id="btnDynamicPublish">Pagar taxa e publicar</button>
+        </form>
+        <div id="dynamicPublishInfo" class="dynamic-status-info muted">Informe o ID acima para consultar a taxa necessária.</div>
       </div>
     </section>
 

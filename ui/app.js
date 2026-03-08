@@ -16,6 +16,10 @@ const CONTRACT_ABI = [
   "function attestMuslim(address subject, bytes32 claimHash, string optionalUri) external",
   "function promoteToSheikh(address subject, bytes32 claimHash, string optionalUri) external",
   "function revokeCredential(uint256 credentialId) external",
+  "function createDynamicCertificateType((string name,string description,uint8 audienceRule,uint256[] prerequisiteTypeIds,uint8 category,bool isPublic,address payoutAddress,uint256 publicationFee,address[] authorizedSheikhs) input) external returns (uint256)",
+  "function updateDynamicCertificateType(uint256 typeId,(string name,string description,uint8 audienceRule,uint256[] prerequisiteTypeIds,uint8 category,bool isPublic,address payoutAddress,uint256 publicationFee,address[] authorizedSheikhs) input) external",
+  "function issueDynamicCertificate(uint256 typeId,address subject,bytes32 claimHash,string optionalUri) external returns (uint256)",
+  "function payDynamicCredentialPublication(uint256 credentialId) external payable",
 
   // ── Leitura ──
   "function getDID(address user) view returns (string)",
@@ -29,14 +33,58 @@ const CONTRACT_ABI = [
   "function deployChainId() view returns (uint256)",
   "function identifyContract() view returns (string)",
   "function getAvailableAttestationTypes() view returns ((uint8 id, string key, string label, string description)[])",
+  "function totalDynamicCertificateTypes() view returns (uint256)",
+  "function listDynamicCertificateTypes() view returns ((uint256 id, bytes32 slug, string name, string description, uint8 audienceRule, uint256[] prerequisiteTypeIds, uint8 category, bool isPublic, uint256 createdAt, address createdBy, uint256 publicationFee, address payoutAddress, address[] authorizedSheikhs, bool exists)[])",
+  "function getDynamicCertificateType(uint256 typeId) view returns (uint256 id, bytes32 slug, string name, string description, uint8 audienceRule, uint256[] prerequisiteTypeIds, uint8 category, bool isPublic, uint256 createdAt, address createdBy, uint256 publicationFee, address payoutAddress, address[] authorizedSheikhs, bool exists)",
+  "function getDynamicCertificateAuthorizedSheikhs(uint256 typeId) view returns (address[])",
+  "function isAuthorizedForDynamicCertificate(uint256 typeId, address sheikh) view returns (bool)",
+  "function getDynamicCredentialStatus(uint256 credentialId) view returns (uint256 typeId, bool published, uint256 publicationFee, address payoutAddress, uint256 paidAmount)",
+  "function getActiveDynamicCredential(address subject, uint256 typeId) view returns (uint256)",
 
   // ── Eventos ──
   "event ProfileRegistered(address indexed user, uint256 indexed userId, bytes32 hNomeOficial, bytes32 hNomeMuculmano, bytes32 hMesquita, string uri)",
   "event CredentialIssued(uint256 indexed credentialId, uint8 credType, address indexed issuer, address indexed subject, bytes32 claimHash, string uri)",
   "event AttestedMuslim(address indexed issuer, address indexed subject, uint256 indexed credentialId)",
   "event SheikhPromoted(address indexed issuer, address indexed subject, uint256 indexed credentialId)",
-  "event CredentialRevoked(uint256 indexed credentialId, address indexed revokedBy)"
+  "event CredentialRevoked(uint256 indexed credentialId, address indexed revokedBy)",
+  "event DynamicCertificateTypeCreated(uint256 indexed typeId, bytes32 indexed slug, address indexed createdBy, string name, string emojiLog)",
+  "event DynamicCertificateTypeUpdated(uint256 indexed typeId, bytes32 indexed slug, address indexed updatedBy, string name, string emojiLog)",
+  "event DynamicCertificateIssued(uint256 indexed credentialId, uint256 indexed typeId, address indexed subject, address issuer, string emojiLog)",
+  "event DynamicCredentialPublicationPaid(uint256 indexed credentialId, address indexed payer, uint256 amount, address payout, string emojiLog)"
 ];
+
+const dynamicState = {
+  loaded: false,
+  items: [],
+  map: new Map(),
+  form: {
+    editingTypeId: null,
+    selectedPrereqs: [],
+    selectedSheikhs: []
+  },
+  lastStatus: null
+};
+
+const dynamicFilters = {
+  prereqAvailable: "",
+  prereqSelected: "",
+  sheikhAvailable: "",
+  sheikhSelected: ""
+};
+
+const dynamicIssueContext = {
+  parsed: null,
+  canonicalPayload: null,
+  derivedSubject: null,
+  derivedUri: null
+};
+
+function resetDynamicIssueContext() {
+  dynamicIssueContext.parsed = null;
+  dynamicIssueContext.canonicalPayload = null;
+  dynamicIssueContext.derivedSubject = null;
+  dynamicIssueContext.derivedUri = null;
+}
 
 // ═══════════════════════════════════════════════════════════
 //  Estado global
@@ -59,6 +107,9 @@ let contractList = [];
 
 /** @type {object|null} Metadados do contrato ativo */
 let contractMetadata = null;
+
+/** @type {ethers.Contract|null} Fonte atual de eventos on-chain */
+let contractEventSource = null;
 
 const MAX_AUTO_SCAN_BLOCKS = 10000;
 const contractScanModalState = {
@@ -90,6 +141,15 @@ let canPromoteToSheik = false;
 const CRED_TYPE_NAMES = ["INITIAL", "MUSLIM_ATTESTATION", "SHEIK_CERTIFICATE"];
 const CRED_BADGE_CLASS = ["badge-initial", "badge-muslim", "badge-sheik"];
 
+const DYNAMIC_AUDIENCE_LABELS = [
+  "Qualquer pessoa",
+  "Somente muçulmanos",
+  "Somente sheiks",
+  "Requer certificados dinâmicos"
+];
+
+const DYNAMIC_CATEGORY_LABELS = ["Palestra", "Curso", "Evento", "Dawa", "Outros"];
+
 /**
  * Seletores de botões on-chain que devem ser desabilitados quando desconectado.
  */
@@ -98,7 +158,10 @@ const ONCHAIN_BUTTONS_SELECTOR = [
   '#formIssue button[type="submit"]',
   '#formRevoke button[type="submit"]',
   '#btnExportVC',
-  '#btnRefreshSheikhs'
+  '#btnRefreshSheikhs',
+  '#btnDynamicSubmit',
+  '#formDynamicIssue button[type="submit"]',
+  '#btnDynamicPublish'
 ].join(",");
 
 /**
@@ -106,11 +169,14 @@ const ONCHAIN_BUTTONS_SELECTOR = [
  * Estrutura por chave (ex.: MUSLIM_ATTESTATION).
  */
 const attestationTypeCatalog = new Map();
+const AUTO_ISSUED_TYPES = new Set(["INITIAL"]);
+const autoIssuedTypeLog = new Set();
 
 /** Marca quais recursos opcionais o contrato suporta. */
 const contractCapabilities = {
   identifyContract: true,
-  attestationCatalog: true
+  attestationCatalog: true,
+  dynamicCertificates: true
 };
 
 /** Ordem padrão caso chamada ao contrato falhe. */
@@ -143,6 +209,101 @@ const FALLBACK_ATTESTATION_TYPES = [
     buildClaims: () => ({ promotedBy: currentAccount, certificateType: "SHEIK_CERTIFICATE" })
   }
 ];
+
+function parseDynamicIssueJson(raw) {
+  if (!raw || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    showStatus("⚠️ JSON inválido para o certificado dinâmico.", "error");
+    throw err;
+  }
+}
+
+function deriveDynamicUriFromJson(json) {
+  const candidates = [
+    json?.uri,
+    json?.metadataUri,
+    json?.credential?.uri,
+    json?.credential?.metadataUri,
+    json?.proof?.uri,
+    json?.credentialSubject?.uri
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return "";
+}
+
+function deriveDynamicSubjectFromJson(json) {
+  const candidates = [
+    json?.subject,
+    json?.subjectAddress,
+    json?.credentialSubject?.id,
+    json?.credentialSubject?.address,
+    json?.credentialSubject?.wallet,
+    json?.credentialSubject?.ethAddress,
+    json?.credentialSubject?.ethereumAddress
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && ethers.isAddress(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function hydrateDynamicIssueFormFromJson(json) {
+  if (!json || typeof json !== "object") return;
+  dynamicIssueContext.parsed = json;
+  dynamicIssueContext.canonicalPayload = canonicalStringify(json);
+  dynamicIssueContext.derivedSubject = deriveDynamicSubjectFromJson(json);
+  dynamicIssueContext.derivedUri = deriveDynamicUriFromJson(json);
+
+  const subjectInput = document.getElementById("dynamicIssueSubject");
+  const uriInput = document.getElementById("dynamicIssueUri");
+  if (dynamicIssueContext.derivedSubject && subjectInput && !subjectInput.value.trim()) {
+    subjectInput.value = dynamicIssueContext.derivedSubject;
+  }
+  if (uriInput && !uriInput.value.trim() && dynamicIssueContext.derivedUri) {
+    uriInput.value = dynamicIssueContext.derivedUri;
+  }
+}
+
+function handleDynamicIssueJsonChange() {
+  const textarea = document.getElementById("dynamicIssueJSON");
+  if (!textarea) return;
+  const raw = textarea.value.trim();
+  if (!raw) {
+    resetDynamicIssueContext();
+    return;
+  }
+  try {
+    const parsed = parseDynamicIssueJson(raw);
+    hydrateDynamicIssueFormFromJson(parsed);
+  } catch (_) {
+    // parseDynamicIssueJson já mostrou alerta
+  }
+}
+
+async function handleDynamicIssueFileChange(event) {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const textarea = document.getElementById("dynamicIssueJSON");
+    textarea.value = text.trim();
+    handleDynamicIssueJsonChange();
+    showStatus(`📄 JSON carregado (${file.name}).`, "info");
+  } catch (err) {
+    showStatus("⚠️ Não foi possível ler o arquivo JSON.", "error");
+    console.warn("[handleDynamicIssueFileChange]", err.message);
+  } finally {
+    event.target.value = "";
+  }
+}
 
 // ═══════════════════════════════════════════════════════════
 //  Modal automático de varredura de contratos
@@ -359,6 +520,7 @@ async function scanLatestIslamicPassportContract({ maxBlocks, onProgress }) {
 FALLBACK_ATTESTATION_TYPES.forEach((item) => attestationTypeCatalog.set(item.key, item));
 
 let defaultAttestationType = "MUSLIM_ATTESTATION";
+ensureDefaultAttestationType();
 
 /** @type {{address: string, did: string}[]} */
 let sheikhDirectory = [];
@@ -586,8 +748,38 @@ function getAttestationTypeLabel(type) {
   return item?.label || type;
 }
 
+function isSelectableAttestationType(key) {
+  if (!key) return false;
+  const selectable = !AUTO_ISSUED_TYPES.has(key);
+  if (!selectable && !autoIssuedTypeLog.has(key)) {
+    autoIssuedTypeLog.add(key);
+    console.info(
+      `🤖 [AttestationCatalog] Tipo ${key} é emitido automaticamente e foi ocultado dos formulários manuais.`
+    );
+  }
+  return selectable;
+}
+
+function getFirstSelectableAttestationType() {
+  for (const key of attestationTypeCatalog.keys()) {
+    if (isSelectableAttestationType(key)) {
+      return key;
+    }
+  }
+  return null;
+}
+
+function ensureDefaultAttestationType() {
+  const candidate = getFirstSelectableAttestationType();
+  if (candidate) {
+    defaultAttestationType = candidate;
+  } else if (!defaultAttestationType || AUTO_ISSUED_TYPES.has(defaultAttestationType)) {
+    defaultAttestationType = "MUSLIM_ATTESTATION";
+  }
+}
+
 function getFirstPermittedAttestationType() {
-  const types = Array.from(attestationTypeCatalog.keys());
+  const types = Array.from(attestationTypeCatalog.keys()).filter(isSelectableAttestationType);
   const preferred = types.find((key) => isTypePermitted(key));
   return preferred || defaultAttestationType;
 }
@@ -596,6 +788,7 @@ function populateAttestationTypeSelect(selectEl) {
   if (!selectEl) return;
   selectEl.innerHTML = "";
   attestationTypeCatalog.forEach((meta, key) => {
+    if (!isSelectableAttestationType(key)) return;
     const opt = document.createElement("option");
     opt.value = key;
     opt.textContent = meta.label;
@@ -611,6 +804,7 @@ function populateAttestationTypeSelect(selectEl) {
 }
 
 function refreshAttestationTypeSelects() {
+  ensureDefaultAttestationType();
   const issueSelect = document.getElementById("issueType");
   const requestSelect = document.getElementById("requestType");
   populateAttestationTypeSelect(issueSelect);
@@ -650,6 +844,7 @@ function updateIssueRulesHint() {
 }
 
 function isTypePermitted(key) {
+  if (!isSelectableAttestationType(key)) return false;
   if (key === "MUSLIM_ATTESTATION") return canAttestMuslim;
   if (key === "SHEIK_CERTIFICATE") return canPromoteToSheik;
   return true;
@@ -684,9 +879,7 @@ async function loadAttestationTypesFromContract() {
         buildClaims: mapTypeToClaimBuilder(key)
       });
     });
-    if (types.length > 0) {
-      defaultAttestationType = types[0].key;
-    }
+    ensureDefaultAttestationType();
   } catch (err) {
     if (isMissingFunctionError(err)) {
       contractCapabilities.attestationCatalog = false;
@@ -696,7 +889,7 @@ async function loadAttestationTypesFromContract() {
     }
     attestationTypeCatalog.clear();
     FALLBACK_ATTESTATION_TYPES.forEach((item) => attestationTypeCatalog.set(item.key, item));
-    defaultAttestationType = FALLBACK_ATTESTATION_TYPES[0].key;
+    ensureDefaultAttestationType();
   }
 
   refreshAttestationTypeSelects();
@@ -802,6 +995,665 @@ function replaceSheikhDirectory(entries) {
     rememberSheikhIdentity(entry.address, { did: entry.did || null }, { silent: true });
   });
   rebuildSheikhDirectorySnapshot();
+  refreshDynamicSheikhOptions();
+}
+
+function isDynamicTabVisible() {
+  const tab = document.getElementById("tabDynamicButton");
+  return tab && !tab.classList.contains("hidden");
+}
+
+function refreshDynamicSheikhOptions() {
+  if (!isDynamicTabVisible()) return;
+  renderDynamicSheikhLists();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Certificados dinâmicos — helpers de UI e estado
+// ═══════════════════════════════════════════════════════════
+
+function normalizeDynamicTypeEntity(raw) {
+  if (!raw) return null;
+  return {
+    id: Number(raw.id),
+    slug: raw.slug,
+    name: raw.name,
+    description: raw.description,
+    audienceRule: Number(raw.audienceRule),
+    prerequisiteTypeIds: (raw.prerequisiteTypeIds || []).map((value) => Number(value)),
+    category: Number(raw.category),
+    isPublic: Boolean(raw.isPublic),
+    createdAt: Number(raw.createdAt),
+    createdBy: raw.createdBy,
+    publicationFee: raw.publicationFee,
+    payoutAddress: raw.payoutAddress,
+    authorizedSheikhs: raw.authorizedSheikhs || [],
+    exists: raw.exists
+  };
+}
+
+function weiToGwei(value) {
+  if (!value) return "0";
+  try {
+    return ethers.formatUnits(value, "gwei");
+  } catch (_) {
+    return "0";
+  }
+}
+
+function gweiToWei(value) {
+  if (!value) return 0n;
+  try {
+    return ethers.parseUnits(String(value), "gwei");
+  } catch (_) {
+    return 0n;
+  }
+}
+
+function renderDynamicTypeSelector() {
+  const selector = document.getElementById("dynamicTypeSelector");
+  const issueSelect = document.getElementById("dynamicIssueType");
+  if (selector) {
+    const current = selector.value;
+    selector.innerHTML = '<option value="">Novo certificado</option>';
+    dynamicState.items.forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = item.id;
+      opt.textContent = `${item.name} (#${item.id})`;
+      selector.appendChild(opt);
+    });
+    selector.value = current && dynamicState.map.has(Number(current)) ? current : "";
+  }
+  if (issueSelect) {
+    const currentIssue = issueSelect.value;
+    issueSelect.innerHTML = "";
+    dynamicState.items.forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = item.id;
+      opt.textContent = `${item.name} (#${item.id})`;
+      issueSelect.appendChild(opt);
+    });
+    if (issueSelect.options.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Nenhum certificado cadastrado";
+      issueSelect.appendChild(opt);
+    }
+    issueSelect.value = currentIssue && dynamicState.map.has(Number(currentIssue)) ? currentIssue : issueSelect.options[0]?.value || "";
+  }
+  updateDynamicIssueHint();
+}
+
+function renderDynamicTypeList() {
+  const container = document.getElementById("dynamicTypesList");
+  if (!container) return;
+  if (dynamicState.items.length === 0) {
+    container.innerHTML = '<p class="muted">Nenhum certificado dinâmico encontrado.</p>';
+    return;
+  }
+  container.innerHTML = "";
+  dynamicState.items.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "dynamic-type-card";
+    const prereqText = item.prerequisiteTypeIds.length
+      ? item.prerequisiteTypeIds.map((id) => `#${id}`).join(", ")
+      : "—";
+    const sheikhCount = item.authorizedSheikhs.length;
+    const visibilityLabel = item.isPublic ? "🌐 Público" : "🔒 Privado";
+    card.innerHTML = `
+      <h4>${escapeHtml(item.name)} <small style="font-weight:400;color:var(--text-secondary);">#${item.id}</small></h4>
+      <p class="muted" style="margin-bottom:0.4rem;">${escapeHtml(item.description || "Sem descrição")}</p>
+      <div class="dynamic-type-meta">
+        <span>${visibilityLabel}</span>
+        <span>🎯 ${DYNAMIC_AUDIENCE_LABELS[item.audienceRule] || "Regra indefinida"}</span>
+        <span>🏷️ ${DYNAMIC_CATEGORY_LABELS[item.category] || "Categoria"}</span>
+        <span>👳 ${sheikhCount} sheiks</span>
+        <span>🧾 Pré-req: ${prereqText}</span>
+        <span>💰 Taxa: ${weiToGwei(item.publicationFee)} Gwei</span>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function renderDynamicPrereqLists() {
+  const availableSelect = document.getElementById("dynamicPrereqAvailable");
+  const selectedSelect = document.getElementById("dynamicPrereqSelected");
+  if (!availableSelect || !selectedSelect) return;
+  const editingId = dynamicState.form.editingTypeId;
+  const selectedIds = dynamicState.form.selectedPrereqs;
+  const availableItems = dynamicState.items.filter(
+    (item) => item.id !== editingId && !selectedIds.includes(item.id)
+  );
+  populateDynamicSelect(
+    availableSelect,
+    availableItems,
+    dynamicFilters.prereqAvailable,
+    (item) => `${item.name} (#${item.id})`
+  );
+  const selectedItems = selectedIds
+    .map((id) => dynamicState.map.get(id))
+    .filter(Boolean);
+  populateDynamicSelect(
+    selectedSelect,
+    selectedItems,
+    dynamicFilters.prereqSelected,
+    (item) => `${item.name} (#${item.id})`
+  );
+}
+
+function renderDynamicSheikhLists() {
+  const availableSelect = document.getElementById("dynamicSheikhAvailable");
+  const selectedSelect = document.getElementById("dynamicSheikhSelected");
+  if (!availableSelect || !selectedSelect) return;
+  const selectedSheikhs = dynamicState.form.selectedSheikhs.map((addr) => addr.toLowerCase());
+  const availableSheikhs = sheikhDirectory.filter(
+    (entry) => !selectedSheikhs.includes(entry.address.toLowerCase())
+  );
+  populateDynamicSelect(
+    availableSelect,
+    availableSheikhs,
+    dynamicFilters.sheikhAvailable,
+    (entry) => `${entry.did || shortAddr(entry.address)} — ${shortAddr(entry.address)}`,
+    (entry) => entry.address
+  );
+  const selectedEntries = dynamicState.form.selectedSheikhs
+    .map((addr) => getCachedSheikhIdentity(addr) || { address: addr, did: null })
+    .map((entry) => ({ ...entry, address: entry.address }));
+  populateDynamicSelect(
+    selectedSelect,
+    selectedEntries,
+    dynamicFilters.sheikhSelected,
+    (entry) => `${entry.did || shortAddr(entry.address)} — ${shortAddr(entry.address)}`,
+    (entry) => entry.address
+  );
+}
+
+function populateDynamicSelect(selectEl, items, filterValue, labelFn, valueFn = (item) => item.id) {
+  const filter = (filterValue || "").trim().toLowerCase();
+  selectEl.innerHTML = "";
+  items
+    .filter((item) => {
+      if (!filter) return true;
+      const label = labelFn(item).toLowerCase();
+      return label.includes(filter);
+    })
+    .forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = valueFn(item);
+      opt.textContent = labelFn(item);
+      selectEl.appendChild(opt);
+    });
+}
+
+function resetDynamicFormFields() {
+  dynamicState.form.editingTypeId = null;
+  dynamicState.form.selectedPrereqs = [];
+  dynamicState.form.selectedSheikhs = [];
+  const form = document.getElementById("formDynamicCreate");
+  if (form) {
+    form.reset();
+  }
+  if (isSheik && currentAccount && !dynamicState.form.selectedSheikhs.includes(currentAccount)) {
+    dynamicState.form.selectedSheikhs.push(currentAccount);
+  }
+  const selector = document.getElementById("dynamicTypeSelector");
+  if (selector) {
+    selector.value = "";
+  }
+  renderDynamicPrereqLists();
+  renderDynamicSheikhLists();
+}
+
+function setDynamicFormFromType(type) {
+  const form = document.getElementById("formDynamicCreate");
+  if (!form) return;
+  dynamicState.form.editingTypeId = type?.id || null;
+  dynamicState.form.selectedPrereqs = [...(type?.prerequisiteTypeIds || [])];
+  dynamicState.form.selectedSheikhs = [...(type?.authorizedSheikhs || [])];
+  document.getElementById("dynamicName").value = type?.name || "";
+  document.getElementById("dynamicDescription").value = type?.description || "";
+  document.getElementById("dynamicCategory").value = type ? type.category : "0";
+  document.getElementById("dynamicAudience").value = type ? type.audienceRule : "0";
+  document.getElementById("dynamicVisibility").value = type ? (type.isPublic ? "public" : "private") : "public";
+  document.getElementById("dynamicPayout").value = type?.payoutAddress && type.payoutAddress !== ethers.ZeroAddress ? type.payoutAddress : "";
+  document.getElementById("dynamicFee").value = type ? weiToGwei(type.publicationFee) : "";
+  renderDynamicPrereqLists();
+  renderDynamicSheikhLists();
+}
+
+function refreshDynamicPrereqOptions() {
+  renderDynamicPrereqLists();
+}
+
+function refreshDynamicCertificates(showToast = false) {
+  if (!contract || !contractAddress) {
+    if (showToast) {
+      showStatus("⚠️ Conecte a carteira e selecione o contrato antes de carregar os certificados dinâmicos.", "warning");
+    }
+    return;
+  }
+  if (!contractCapabilities.dynamicCertificates) {
+    if (showToast) {
+      showStatus("🚫 Este contrato não possui suporte a certificados dinâmicos.", "warning");
+    }
+    return;
+  }
+  (async () => {
+    try {
+      const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+      const rawTypes = await rc.listDynamicCertificateTypes();
+      dynamicState.items = rawTypes.map(normalizeDynamicTypeEntity).filter((item) => item && item.exists);
+      dynamicState.map.clear();
+      dynamicState.items.forEach((item) => dynamicState.map.set(item.id, item));
+      dynamicState.loaded = true;
+      renderDynamicTypeSelector();
+      renderDynamicTypeList();
+      renderDynamicPrereqLists();
+      renderDynamicSheikhLists();
+      if (showToast) {
+        showStatus("📜 Certificados dinâmicos atualizados!", "success");
+      }
+    } catch (err) {
+      console.error("[refreshDynamicCertificates]", err);
+      showStatus(`⚠️ Falha ao carregar certificados dinâmicos: ${err.message || err}`, "error");
+    }
+  })();
+}
+
+function attachDynamicEventListeners() {
+  if (!contract || !contractCapabilities.dynamicCertificates) return;
+  detachDynamicEventListeners();
+  contractEventSource = contract;
+  contractEventSource.on("DynamicCertificateIssued", onDynamicCertificateIssued);
+  contractEventSource.on("DynamicCredentialPublicationPaid", onDynamicCredentialPublicationPaid);
+  contractEventSource.on("DynamicCertificateTypeCreated", onDynamicCertificateTypeCreated);
+  contractEventSource.on("DynamicCertificateTypeUpdated", onDynamicCertificateTypeUpdated);
+}
+
+function detachDynamicEventListeners() {
+  if (!contractEventSource) return;
+  try {
+    contractEventSource.removeAllListeners?.("DynamicCertificateIssued");
+    contractEventSource.removeAllListeners?.("DynamicCredentialPublicationPaid");
+    contractEventSource.removeAllListeners?.("DynamicCertificateTypeCreated");
+    contractEventSource.removeAllListeners?.("DynamicCertificateTypeUpdated");
+  } catch (err) {
+    console.warn("[detachDynamicEventListeners]", err.message);
+  }
+  contractEventSource = null;
+}
+
+function compileDynamicAlertMessage({ title, body, type = "info" }) {
+  const emoji = { success: "✅", warning: "⚠️", error: "⛔", info: "ℹ️" }[type] || "ℹ️";
+  return `${emoji} ${title} — ${body}`;
+}
+
+function onDynamicCertificateIssued(credentialId, typeId, subject, issuer, emojiLog, event) {
+  const args = event?.args || {};
+  const cred = Number(args[0] ?? credentialId);
+  const typ = Number(args[1] ?? typeId);
+  const subj = args[2] || subject;
+  const author = args[3] || issuer;
+  const logMsg = args[4] || emojiLog || "🌙 Certificado emitido";
+  const body = `Tipo #${typ}, credencial #${cred}, sujeito ${shortAddr(subj)}, emissor ${shortAddr(author)}.`;
+  showStatus(compileDynamicAlertMessage({ title: logMsg, body, type: "success" }), "success", 8000);
+  if (dynamicState.loaded) {
+    updateDynamicIssueHint();
+  }
+}
+
+function onDynamicCredentialPublicationPaid(credentialId, payer, amount, payout, emojiLog, event) {
+  const args = event?.args || {};
+  const cred = Number(args[0] ?? credentialId);
+  const pay = args[1] || payer;
+  const amt = args[2] || amount;
+  const dest = args[3] || payout;
+  const logMsg = args[4] || emojiLog || "💎 Publicação paga";
+  const body = `Credencial #${cred} publicada por ${shortAddr(pay)} · ${weiToGwei(amt)} Gwei enviados a ${shortAddr(dest)}.`;
+  showStatus(compileDynamicAlertMessage({ title: logMsg, body, type: "success" }), "success", 8000);
+  if (dynamicState.lastStatus && dynamicState.lastStatus.credentialId === cred) {
+    dynamicState.lastStatus = {
+      ...dynamicState.lastStatus,
+      published: true,
+      paidAmount: amt,
+      payoutAddress: dest
+    };
+    renderDynamicPublishInfo();
+  }
+}
+
+function onDynamicCertificateTypeCreated(typeId, slug, createdBy, name, emojiLog, event) {
+  const args = event?.args || {};
+  const id = Number(args[0] ?? typeId);
+  const author = args[2] || createdBy;
+  const label = args[3] || name;
+  const logMsg = args[4] || emojiLog || "🎖️ Novo certificado dinâmico";
+  const body = `Tipo #${id} (${label}) criado por ${shortAddr(author)}.`;
+  showStatus(compileDynamicAlertMessage({ title: logMsg, body, type: "info" }), "info", 6000);
+  refreshDynamicCertificates();
+}
+
+function onDynamicCertificateTypeUpdated(typeId, slug, updatedBy, name, emojiLog, event) {
+  const args = event?.args || {};
+  const id = Number(args[0] ?? typeId);
+  const author = args[2] || updatedBy;
+  const label = args[3] || name;
+  const logMsg = args[4] || emojiLog || "🛠️ Certificado dinâmico atualizado";
+  const body = `Tipo #${id} (${label}) atualizado por ${shortAddr(author)}.`;
+  showStatus(compileDynamicAlertMessage({ title: logMsg, body, type: "info" }), "info", 6000);
+  refreshDynamicCertificates();
+}
+
+function updateDynamicIssueHint() {
+  const hintEl = document.getElementById("dynamicIssueHint");
+  if (!hintEl) return;
+  const select = document.getElementById("dynamicIssueType");
+  const selected = select?.value ? dynamicState.map.get(Number(select.value)) : null;
+  if (!selected) {
+    hintEl.textContent = "Selecione um certificado dinâmico para ver as regras de emissão.";
+    return;
+  }
+  const parts = [];
+  parts.push(selected.isPublic ? "🌐 Certificado público" : "🔒 Certificado privado");
+  parts.push(`🎯 Público: ${DYNAMIC_AUDIENCE_LABELS[selected.audienceRule] || "-"}`);
+  parts.push(`🧾 Pré-req: ${selected.prerequisiteTypeIds.length ? selected.prerequisiteTypeIds.map((id) => `#${id}`).join(", ") : "Nenhum"}`);
+  parts.push(`💰 Taxa publicação: ${weiToGwei(selected.publicationFee)} Gwei`);
+  hintEl.textContent = parts.join(" · ");
+}
+
+function handleDynamicTypeSelectorChange() {
+  const selector = document.getElementById("dynamicTypeSelector");
+  if (!selector) return;
+  const selectedId = selector.value ? Number(selector.value) : null;
+  if (!selectedId) {
+    resetDynamicFormFields();
+    return;
+  }
+  const type = dynamicState.map.get(selectedId);
+  if (!type) {
+    resetDynamicFormFields();
+    return;
+  }
+  setDynamicFormFromType(type);
+}
+
+function handleDynamicFilterInput(event) {
+  const { id, value } = event.target;
+  switch (id) {
+    case "dynamicPrereqFilter":
+      dynamicFilters.prereqAvailable = value;
+      renderDynamicPrereqLists();
+      break;
+    case "dynamicPrereqSelectedFilter":
+      dynamicFilters.prereqSelected = value;
+      renderDynamicPrereqLists();
+      break;
+    case "dynamicSheikhAvailableFilter":
+      dynamicFilters.sheikhAvailable = value;
+      renderDynamicSheikhLists();
+      break;
+    case "dynamicSheikhSelectedFilter":
+      dynamicFilters.sheikhSelected = value;
+      renderDynamicSheikhLists();
+      break;
+    default:
+      break;
+  }
+}
+
+function moveSelectedOptions(sourceId, targetArray, transformer = (value) => value) {
+  const select = document.getElementById(sourceId);
+  if (!select) return;
+  const values = Array.from(select.selectedOptions).map((opt) => transformer(opt.value));
+  values.forEach((val) => {
+    if (val != null && !targetArray.includes(val)) {
+      targetArray.push(val);
+    }
+  });
+}
+
+function removeSelectedOptions(selectId, targetArray, comparer = (value) => value) {
+  const select = document.getElementById(selectId);
+  if (!select) return;
+  const values = Array.from(select.selectedOptions).map((opt) => comparer(opt.value.toLowerCase()));
+  for (const val of values) {
+    const idx = targetArray.findIndex((item) => comparer(String(item).toLowerCase()) === val);
+    if (idx >= 0) {
+      targetArray.splice(idx, 1);
+    }
+  }
+}
+
+function handleAddPrereq() {
+  moveSelectedOptions("dynamicPrereqAvailable", dynamicState.form.selectedPrereqs, (value) => Number(value));
+  renderDynamicPrereqLists();
+}
+
+function handleRemovePrereq() {
+  removeSelectedOptions("dynamicPrereqSelected", dynamicState.form.selectedPrereqs, (value) => Number(value));
+  renderDynamicPrereqLists();
+}
+
+function handleAddSheikh() {
+  moveSelectedOptions("dynamicSheikhAvailable", dynamicState.form.selectedSheikhs);
+  renderDynamicSheikhLists();
+}
+
+function handleRemoveSheikh() {
+  removeSelectedOptions("dynamicSheikhSelected", dynamicState.form.selectedSheikhs);
+  renderDynamicSheikhLists();
+}
+
+function validateSheikhAddress(address) {
+  try {
+    return ethers.getAddress(address);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function handleDynamicFormSubmit(event) {
+  event.preventDefault();
+  if (!contract) {
+    showStatus("⚠️ Configure o contrato antes de salvar certificados dinâmicos.", "warning");
+    return;
+  }
+  if (dynamicState.form.selectedSheikhs.length === 0) {
+    showStatus("👳 Selecione ao menos um sheik autorizado.", "warning");
+    return;
+  }
+  const payload = collectDynamicFormPayload();
+  if (!payload) return;
+  const editing = dynamicState.form.editingTypeId;
+  const action = editing ? "Atualizar certificado dinâmico" : "Criar certificado dinâmico";
+  const method = editing ? "updateDynamicCertificateType" : "createDynamicCertificateType";
+  const args = editing ? [editing, payload] : [payload];
+  const receipt = await executeWithConfirmation(`🧾 ${action}`, method, args);
+  if (receipt) {
+    showStatus(editing ? "🛠️ Certificado atualizado com sucesso!" : "🎖️ Certificado criado com sucesso!", "success");
+    resetDynamicFormFields();
+    refreshDynamicCertificates();
+  }
+}
+
+function collectDynamicFormPayload() {
+  const name = document.getElementById("dynamicName").value.trim();
+  const description = document.getElementById("dynamicDescription").value.trim();
+  const audienceRule = Number(document.getElementById("dynamicAudience").value);
+  const category = Number(document.getElementById("dynamicCategory").value);
+  const visibilityValue = document.getElementById("dynamicVisibility").value;
+  const payoutRaw = document.getElementById("dynamicPayout").value.trim();
+  const feeInput = document.getElementById("dynamicFee").value.trim();
+  const payoutAddress = payoutRaw ? validateSheikhAddress(payoutRaw) : ethers.ZeroAddress;
+  if (payoutRaw && !payoutAddress) {
+    showStatus("⚠️ Conta para recebimento inválida.", "error");
+    return null;
+  }
+  const publicationFee = gweiToWei(feeInput || "0");
+  const uniqueSheikhs = Array.from(new Set(dynamicState.form.selectedSheikhs.map(validateSheikhAddress))).filter(Boolean);
+  if (uniqueSheikhs.length === 0) {
+    showStatus("👳 Nenhum sheik válido informado.", "error");
+    return null;
+  }
+  const payload = {
+    name,
+    description,
+    audienceRule,
+    prerequisiteTypeIds: dynamicState.form.selectedPrereqs,
+    category,
+    isPublic: visibilityValue !== "private",
+    payoutAddress,
+    publicationFee,
+    authorizedSheikhs: uniqueSheikhs
+  };
+  return payload;
+}
+
+function handleDynamicFormReset(event) {
+  event?.preventDefault();
+  resetDynamicFormFields();
+}
+
+async function handleDynamicIssue(event) {
+  event.preventDefault();
+  if (!contract) {
+    showStatus("⚠️ Configure o contrato antes de emitir certificados dinâmicos.", "warning");
+    return;
+  }
+  const typeSelect = document.getElementById("dynamicIssueType");
+  const typeId = typeSelect?.value ? Number(typeSelect.value) : null;
+  if (!typeId) {
+    showStatus("📌 Escolha um certificado dinâmico para emitir.", "warning");
+    return;
+  }
+  const subjectInput = document.getElementById("dynamicIssueSubject");
+  const subject = subjectInput.value.trim();
+  if (!ethers.isAddress(subject)) {
+    showStatus("⚠️ Endereço do destinatário inválido.", "error");
+    return;
+  }
+  const { claimHash, uri } = buildDynamicClaimPayload();
+  const notes = document.getElementById("dynamicIssueNotes").value.trim();
+  const receipt = await executeWithConfirmation(
+    "🌙 Emitir certificado dinâmico",
+    "issueDynamicCertificate",
+    [typeId, subject, claimHash, uri || notes || ""]
+  );
+  if (receipt) {
+    showStatus("🌙 Certificado dinâmico emitido com sucesso!", "success");
+    document.getElementById("formDynamicIssue").reset();
+    resetDynamicIssueContext();
+    updateDynamicIssueHint();
+  }
+}
+
+function buildDynamicClaimPayload() {
+  const jsonTextarea = document.getElementById("dynamicIssueJSON");
+  const uriInput = document.getElementById("dynamicIssueUri");
+  const rawJson = jsonTextarea?.value?.trim();
+  if (rawJson) {
+    try {
+      const parsed = parseDynamicIssueJson(rawJson);
+      hydrateDynamicIssueFormFromJson(parsed);
+      const canonical = canonicalStringify(parsed);
+      dynamicIssueContext.canonicalPayload = canonical;
+      const uri = uriInput?.value?.trim() || dynamicIssueContext.derivedUri || "";
+      return { claimHash: hashKeccak(canonical), uri };
+    } catch (err) {
+      console.warn("[buildDynamicClaimPayload] JSON inválido", err.message);
+    }
+  }
+  const uri = uriInput?.value?.trim() || "";
+  const notes = document.getElementById("dynamicIssueNotes").value.trim();
+  const fallbackPayload = notes || `dynamic:${Date.now()}:${Math.random()}`;
+  return { claimHash: hashKeccak(fallbackPayload), uri };
+}
+
+async function checkDynamicCredentialStatus(event) {
+  event?.preventDefault();
+  if (!contract) {
+    showStatus("⚠️ Configure o contrato para consultar o status.", "warning");
+    return;
+  }
+  const credIdRaw = document.getElementById("dynamicPublishCredential").value.trim();
+  if (!credIdRaw) {
+    showStatus("🧾 Informe o ID da credencial.", "warning");
+    return;
+  }
+  try {
+    const rc = Web3Client.getReadContract(CONTRACT_ABI, contractAddress);
+    const status = await rc.getDynamicCredentialStatus(credIdRaw);
+    dynamicState.lastStatus = {
+      credentialId: Number(credIdRaw),
+      typeId: Number(status.typeId),
+      published: status.published,
+      publicationFee: status.publicationFee,
+      payoutAddress: status.payoutAddress,
+      paidAmount: status.paidAmount
+    };
+    renderDynamicPublishInfo();
+    showStatus("ℹ️ Status da credencial atualizado!", "info", 4000);
+  } catch (err) {
+    console.warn("[checkDynamicCredentialStatus]", err);
+    showStatus(`⚠️ Não foi possível consultar o status: ${err.message || err}`, "error");
+  }
+}
+
+function renderDynamicPublishInfo() {
+  const info = document.getElementById("dynamicPublishInfo");
+  if (!info) return;
+  const status = dynamicState.lastStatus;
+  if (!status) {
+    info.textContent = "Informe o ID acima para consultar a taxa necessária.";
+    info.classList.add("muted");
+    return;
+  }
+  info.classList.remove("muted");
+  if (status.published) {
+    info.textContent = `✅ Certificado #${status.credentialId} já está publicado. Valor pago: ${weiToGwei(status.paidAmount)} Gwei.`;
+  } else {
+    info.textContent = `💳 Certificado #${status.credentialId} exige ${weiToGwei(status.publicationFee)} Gwei para publicação. Destino: ${shortAddr(status.payoutAddress)}.`;
+  }
+}
+
+async function handleDynamicPublish(event) {
+  event.preventDefault();
+  if (!contract) {
+    showStatus("⚠️ Configure o contrato antes de pagar a publicação.", "warning");
+    return;
+  }
+  const credIdRaw = document.getElementById("dynamicPublishCredential").value.trim();
+  if (!credIdRaw) {
+    showStatus("🧾 Informe o ID da credencial.", "warning");
+    return;
+  }
+  if (!dynamicState.lastStatus || dynamicState.lastStatus.credentialId !== Number(credIdRaw)) {
+    await checkDynamicCredentialStatus();
+  }
+  const status = dynamicState.lastStatus;
+  if (!status || status.credentialId !== Number(credIdRaw)) {
+    return;
+  }
+  if (status.published) {
+    showStatus("✅ Esta credencial já está publicada.", "info");
+    return;
+  }
+  if (!status.publicationFee || status.publicationFee === 0n) {
+    showStatus("⚠️ Nenhuma taxa configurada para publicação.", "warning");
+    return;
+  }
+  const receipt = await executeWithConfirmation(
+    "💎 Publicar certificado dinâmico",
+    "payDynamicCredentialPublication",
+    [status.credentialId],
+    { value: status.publicationFee }
+  );
+  if (receipt) {
+    showStatus("💎 Publicação paga com sucesso!", "success");
+    dynamicState.lastStatus = { ...status, published: true, paidAmount: status.publicationFee };
+    renderDynamicPublishInfo();
+  }
 }
 
 function getCachedSheikhIdentity(address) {
@@ -911,6 +1763,26 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function canonicalizeJson(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJson);
+  }
+  if (value && typeof value === "object") {
+    const sorted = {};
+    Object.keys(value)
+      .sort()
+      .forEach((key) => {
+        sorted[key] = canonicalizeJson(value[key]);
+      });
+    return sorted;
+  }
+  return value;
+}
+
+function canonicalStringify(value) {
+  return JSON.stringify(canonicalizeJson(value));
 }
 
 function formatSheikhIssuerHtml(identity, address, { highlight = false } = {}) {
@@ -1253,6 +2125,7 @@ async function refreshTabAccess() {
   const tabDashboard = document.querySelector('nav.tabs button[data-tab="tabDashboard"]');
   const tabSheikhs = document.querySelector('nav.tabs button[data-tab="tabSheikhs"]');
   const tabAttest   = document.querySelector('nav.tabs button[data-tab="tabAttest"]');
+  const tabDynamic  = document.getElementById("tabDynamicButton");
   const tabRequest  = document.querySelector('nav.tabs button[data-tab="tabRequest"]');
   const formAttestButton = document.querySelector('#formAttest button[type="submit"]');
   const formPromoteButton = document.querySelector('#formPromote button[type="submit"]');
@@ -1375,6 +2248,18 @@ async function refreshTabAccess() {
     tabSheikhs.classList.remove("tab-disabled");
     tabRequest.disabled = false;
     tabRequest.classList.remove("tab-disabled");
+    if (tabDynamic) {
+      const canManageDynamic = isSheik || isSuperAdmin;
+      tabDynamic.classList.toggle("hidden", !canManageDynamic);
+      tabDynamic.disabled = !canManageDynamic;
+      tabDynamic.classList.toggle("tab-disabled", !canManageDynamic);
+      if (!canManageDynamic && tabDynamic.classList.contains("active")) {
+        switchTab("tabDashboard");
+      }
+      if (canManageDynamic && !dynamicState.loaded) {
+        refreshDynamicCertificates();
+      }
+    }
 
   } catch (err) {
     console.warn("[refreshTabAccess] Erro ao verificar status:", err.message);
@@ -1454,6 +2339,7 @@ async function getNetworkFriendlyName(chainId) {
  */
 function disconnectWallet() {
   // Reseta estado
+  detachDynamicEventListeners();
   currentAccount = null;
   currentChainId = null;
   contract = null;
@@ -1917,6 +2803,7 @@ async function attachContract(addr) {
       console.warn(`[attachContract] bytecode não detectado para ${addr} (pode ser cache stale do MetaMask)`);
     }
 
+    detachDynamicEventListeners();
     contractAddress = addr;
     contract = Web3Client.getContractWithSigner(CONTRACT_ABI, addr);
     localStorage.setItem("ip_contractAddress", addr);
@@ -1936,6 +2823,7 @@ async function attachContract(addr) {
     await refreshTabAccess();
     await loadAttestationTypesFromContract();
     await refreshContractMetadata();
+    attachDynamicEventListeners();
 
   } catch (err) {
     console.error("[attachContract] Erro:", err);
@@ -2076,7 +2964,7 @@ function hideDataLoadingOverlay() {
  * @param {Array} args - Argumentos do método
  * @returns {Promise<ethers.TransactionReceipt|null>} - Receipt ou null se cancelado
  */
-async function executeWithConfirmation(actionName, methodName, args = []) {
+async function executeWithConfirmation(actionName, methodName, args = [], overrides = null) {
   if (!currentAccount) {
     showStatus("Conecte a carteira primeiro.", "warning");
     return null;
@@ -2112,12 +3000,13 @@ async function executeWithConfirmation(actionName, methodName, args = []) {
   try {
     showTxOverlay("Enviando transação… Confirme no MetaMask.");
     // Passa overrides com gasLimit, gasPrice e type 0 (legado) para evitar EIP-1559
-    const overrides = {
+    const txOverrides = {
       gasLimit: estimation.gasLimit,
       gasPrice: estimation.gasPrice,
-      type: 0
+      type: 0,
+      ...(overrides || {})
     };
-    tx = await contract[methodName](...args, overrides);
+    tx = await contract[methodName](...args, txOverrides);
   } catch (err) {
     hideTxOverlay();
     console.error("[sendTx] Erro:", err);
@@ -2178,6 +3067,20 @@ function switchTab(tabId) {
       showStatus("Adicione o endereço do contrato implantado antes de consultar os sheiks.", "warning");
     }
     refreshSheikhs();
+  }
+  if (tabId === "tabDynamic") {
+    if (!isDynamicTabVisible()) {
+      showStatus("🚫 Apenas admins ou sheiks ativos acessam esta aba.", "warning");
+      switchTab("tabDashboard");
+      return;
+    }
+    if (!dynamicState.loaded) {
+      refreshDynamicCertificates();
+    } else {
+      renderDynamicTypeList();
+      renderDynamicPrereqLists();
+      renderDynamicSheikhLists();
+    }
   }
 }
 
@@ -2936,6 +3839,65 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Atualizar sheiks ──
   document.getElementById("btnRefreshSheikhs").addEventListener("click", refreshSheikhs);
+
+  // ── Certificados dinâmicos ──
+  const dynamicTypeSelector = document.getElementById("dynamicTypeSelector");
+  if (dynamicTypeSelector) {
+    dynamicTypeSelector.addEventListener("change", handleDynamicTypeSelectorChange);
+  }
+  [
+    "dynamicPrereqFilter",
+    "dynamicPrereqSelectedFilter",
+    "dynamicSheikhAvailableFilter",
+    "dynamicSheikhSelectedFilter"
+  ].forEach((id) => {
+    const input = document.getElementById(id);
+    if (input) input.addEventListener("input", handleDynamicFilterInput);
+  });
+  const btnAddPrereq = document.getElementById("btnAddPrereq");
+  const btnRemovePrereq = document.getElementById("btnRemovePrereq");
+  const btnAddSheikh = document.getElementById("btnAddSheikh");
+  const btnRemoveSheikh = document.getElementById("btnRemoveSheikh");
+  if (btnAddPrereq) btnAddPrereq.addEventListener("click", handleAddPrereq);
+  if (btnRemovePrereq) btnRemovePrereq.addEventListener("click", handleRemovePrereq);
+  if (btnAddSheikh) btnAddSheikh.addEventListener("click", handleAddSheikh);
+  if (btnRemoveSheikh) btnRemoveSheikh.addEventListener("click", handleRemoveSheikh);
+  const formDynamicCreate = document.getElementById("formDynamicCreate");
+  if (formDynamicCreate) {
+    formDynamicCreate.addEventListener("submit", handleDynamicFormSubmit);
+  }
+  const btnDynamicReset = document.getElementById("btnDynamicReset");
+  if (btnDynamicReset) {
+    btnDynamicReset.addEventListener("click", handleDynamicFormReset);
+  }
+  const btnDynamicReload = document.getElementById("btnDynamicReload");
+  if (btnDynamicReload) {
+    btnDynamicReload.addEventListener("click", () => refreshDynamicCertificates(true));
+  }
+  const formDynamicIssue = document.getElementById("formDynamicIssue");
+  if (formDynamicIssue) {
+    formDynamicIssue.addEventListener("submit", handleDynamicIssue);
+  }
+  const dynamicIssueType = document.getElementById("dynamicIssueType");
+  if (dynamicIssueType) {
+    dynamicIssueType.addEventListener("change", updateDynamicIssueHint);
+  }
+  const dynamicIssueJsonField = document.getElementById("dynamicIssueJSON");
+  if (dynamicIssueJsonField) {
+    ["blur", "change"].forEach((evt) => dynamicIssueJsonField.addEventListener(evt, handleDynamicIssueJsonChange));
+  }
+  const dynamicIssueJsonFile = document.getElementById("dynamicIssueJsonFile");
+  if (dynamicIssueJsonFile) {
+    dynamicIssueJsonFile.addEventListener("change", handleDynamicIssueFileChange);
+  }
+  const btnDynamicCheckStatus = document.getElementById("btnDynamicCheckStatus");
+  if (btnDynamicCheckStatus) {
+    btnDynamicCheckStatus.addEventListener("click", checkDynamicCredentialStatus);
+  }
+  const formDynamicPublish = document.getElementById("formDynamicPublish");
+  if (formDynamicPublish) {
+    formDynamicPublish.addEventListener("submit", handleDynamicPublish);
+  }
 
   // ── Exportar VC ──
   document.getElementById("btnExportVC").addEventListener("click", exportVC);

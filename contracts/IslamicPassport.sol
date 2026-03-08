@@ -44,7 +44,8 @@ contract IslamicPassportV2 is AccessControl {
     enum CredentialType {
         INITIAL,
         MUSLIM_ATTESTATION,
-        SHEIK_CERTIFICATE
+        SHEIK_CERTIFICATE,
+        DYNAMIC_CERTIFICATE
     }
 
     struct AttestationTypeMeta {
@@ -74,14 +75,74 @@ contract IslamicPassportV2 is AccessControl {
         bool revoked;
     }
 
+    enum DynamicAudienceRule {
+        ANYONE,
+        MUSLIM_ONLY,
+        SHEIK_ONLY,
+        REQUIRES_DYNAMIC_CERT
+    }
+
+    enum DynamicCertificateCategory {
+        PALESTRA,
+        CURSO,
+        EVENTO_GERAL,
+        DAWA,
+        OUTROS
+    }
+
+    struct DynamicCertificateType {
+        uint256 id;
+        bytes32 slug;
+        string name;
+        string description;
+        DynamicAudienceRule audienceRule;
+        uint256[] prerequisiteTypeIds;
+        DynamicCertificateCategory category;
+        bool isPublic;
+        uint256 createdAt;
+        address createdBy;
+        uint256 publicationFee;
+        address payoutAddress;
+        address[] authorizedSheikhs;
+        bool exists;
+    }
+
+    struct DynamicCredentialStatus {
+        uint256 typeId;
+        bool published;
+        uint256 publicationFee;
+        address payoutAddress;
+        uint256 paidAmount;
+    }
+
+    struct CreateDynamicCertificateInput {
+        string name;
+        string description;
+        DynamicAudienceRule audienceRule;
+        uint256[] prerequisiteTypeIds;
+        DynamicCertificateCategory category;
+        bool isPublic;
+        address payoutAddress;
+        uint256 publicationFee;
+        address[] authorizedSheikhs;
+    }
+
     uint256 private _nextUserId = 1;
     uint256 private _nextCredentialId = 1;
+    uint256 private _nextDynamicTypeId = 1;
 
     mapping(address => Profile) private _profiles;
     mapping(uint256 => Credential) private _credentials;
     mapping(address => uint256[]) private _userCredentials;
     address[] private _sheikhs;
     mapping(address => bool) private _isSheikh;
+    mapping(uint256 => DynamicCertificateType) private _dynamicCertificateTypes;
+    mapping(bytes32 => uint256) private _dynamicCertificateSlugIndex;
+    mapping(uint256 => mapping(address => bool)) private _dynamicAuthorizedSheikhs;
+    mapping(address => mapping(uint256 => uint256)) private _activeDynamicCertificates;
+    mapping(uint256 => uint256) private _credentialDynamicType;
+    mapping(uint256 => DynamicCredentialStatus) private _dynamicCredentialStatus;
+    uint256[] private _dynamicTypeIds;
     uint256 public deployChainId;
 
     address public immutable legacyContract;
@@ -135,6 +196,38 @@ contract IslamicPassportV2 is AccessControl {
     event CredentialRevoked(
         uint256 indexed credentialId,
         address indexed revokedBy
+    );
+
+    event DynamicCertificateTypeCreated(
+        uint256 indexed typeId,
+        bytes32 indexed slug,
+        address indexed createdBy,
+        string name,
+        string emojiLog
+    );
+
+    event DynamicCertificateTypeUpdated(
+        uint256 indexed typeId,
+        bytes32 indexed slug,
+        address indexed updatedBy,
+        string name,
+        string emojiLog
+    );
+
+    event DynamicCertificateIssued(
+        uint256 indexed credentialId,
+        uint256 indexed typeId,
+        address indexed subject,
+        address issuer,
+        string emojiLog
+    );
+
+    event DynamicCredentialPublicationPaid(
+        uint256 indexed credentialId,
+        address indexed payer,
+        uint256 amount,
+        address payout,
+        string emojiLog
     );
 
     constructor(address legacyAddress) {
@@ -370,6 +463,225 @@ contract IslamicPassportV2 is AccessControl {
         });
     }
 
+    function totalDynamicCertificateTypes() external view returns (uint256) {
+        return _dynamicTypeIds.length;
+    }
+
+    function listDynamicCertificateTypes() external view returns (DynamicCertificateType[] memory types_) {
+        uint256 len = _dynamicTypeIds.length;
+        types_ = new DynamicCertificateType[](len);
+        for (uint256 i = 0; i < len; i++) {
+            types_[i] = _dynamicCertificateTypes[_dynamicTypeIds[i]];
+        }
+    }
+
+    function getDynamicCertificateType(uint256 typeId) external view returns (DynamicCertificateType memory type_) {
+        type_ = _dynamicCertificateTypes[typeId];
+        require(type_.exists, unicode"❓ IslamicPassport: tipo dinamico inexistente");
+    }
+
+    function getDynamicCertificateAuthorizedSheikhs(uint256 typeId)
+        external
+        view
+        returns (address[] memory sheikhs)
+    {
+        DynamicCertificateType storage record = _dynamicCertificateTypes[typeId];
+        require(record.exists, unicode"❓ IslamicPassport: tipo dinamico inexistente");
+        sheikhs = record.authorizedSheikhs;
+    }
+
+    function isAuthorizedForDynamicCertificate(uint256 typeId, address sheikh) external view returns (bool) {
+        return _dynamicAuthorizedSheikhs[typeId][sheikh];
+    }
+
+    function getDynamicCredentialStatus(uint256 credentialId)
+        external
+        view
+        returns (DynamicCredentialStatus memory status)
+    {
+        Credential storage cred = _credentials[credentialId];
+        require(cred.id != 0, unicode"❌ IslamicPassport: credencial inexistente");
+        require(cred.credType == CredentialType.DYNAMIC_CERTIFICATE, unicode"🎫 IslamicPassport: tipo invalido");
+        status = _dynamicCredentialStatus[credentialId];
+        require(status.typeId != 0, unicode"⚙️ IslamicPassport: status dinamico inexistente");
+    }
+
+    function getActiveDynamicCredential(address subject, uint256 typeId) external view returns (uint256) {
+        return _activeDynamicCertificates[subject][typeId];
+    }
+
+    function createDynamicCertificateType(CreateDynamicCertificateInput calldata input)
+        external
+        returns (uint256)
+    {
+        require(
+            hasRole(SUPER_ADMIN_ROLE, msg.sender) || _canActAsAttestedSheikh(msg.sender),
+            unicode"🔐 IslamicPassport: somente SuperAdmin ou Sheik ativo pode criar"
+        );
+        require(bytes(input.name).length > 2, unicode"📛 IslamicPassport: nome do certificado invalido");
+
+        bytes32 slug = _generateCertificateSlug(input.name);
+        require(_dynamicCertificateSlugIndex[slug] == 0, unicode"♻️ IslamicPassport: certificado ja existe");
+
+        if (input.audienceRule == DynamicAudienceRule.REQUIRES_DYNAMIC_CERT) {
+            require(input.prerequisiteTypeIds.length > 0, unicode"🔁 IslamicPassport: prerequisitos obrigatorios");
+        }
+
+        uint256 typeId = _nextDynamicTypeId++;
+        DynamicCertificateType storage record = _dynamicCertificateTypes[typeId];
+        record.id = typeId;
+        record.slug = slug;
+        record.name = input.name;
+        record.description = input.description;
+        record.audienceRule = input.audienceRule;
+        _setDynamicPrerequisites(record, input.prerequisiteTypeIds);
+        record.category = input.category;
+        record.isPublic = input.isPublic;
+        record.createdAt = block.timestamp;
+        record.createdBy = msg.sender;
+        record.publicationFee = input.publicationFee;
+        record.payoutAddress = input.payoutAddress;
+        record.exists = true;
+
+        _dynamicCertificateSlugIndex[slug] = typeId;
+        _dynamicTypeIds.push(typeId);
+
+        _primeAuthorizedSheikhs(typeId, record, input.authorizedSheikhs);
+        require(record.authorizedSheikhs.length > 0, unicode"👳 IslamicPassport: ao menos um sheik autorizado");
+
+        emit DynamicCertificateTypeCreated(
+            typeId,
+            slug,
+            msg.sender,
+            record.name,
+            unicode"🎖️ Novo certificado dinamico criado"
+        );
+
+        return typeId;
+    }
+
+    function updateDynamicCertificateType(uint256 typeId, CreateDynamicCertificateInput calldata input) external {
+        DynamicCertificateType storage record = _dynamicCertificateTypes[typeId];
+        require(record.exists, unicode"❓ IslamicPassport: tipo dinamico inexistente");
+        require(
+            hasRole(SUPER_ADMIN_ROLE, msg.sender) || _dynamicAuthorizedSheikhs[typeId][msg.sender],
+            unicode"🔐 IslamicPassport: acesso negado para atualizar"
+        );
+        require(bytes(input.name).length > 2, unicode"📛 IslamicPassport: nome do certificado invalido");
+
+        if (input.audienceRule == DynamicAudienceRule.REQUIRES_DYNAMIC_CERT) {
+            require(input.prerequisiteTypeIds.length > 0, unicode"🔁 IslamicPassport: prerequisitos obrigatorios");
+        }
+
+        bytes32 newSlug = _generateCertificateSlug(input.name);
+        if (newSlug != record.slug) {
+            uint256 existing = _dynamicCertificateSlugIndex[newSlug];
+            require(existing == 0 || existing == typeId, unicode"♻️ IslamicPassport: slug em uso");
+            _dynamicCertificateSlugIndex[record.slug] = 0;
+            _dynamicCertificateSlugIndex[newSlug] = typeId;
+            record.slug = newSlug;
+        }
+
+        record.name = input.name;
+        record.description = input.description;
+        record.audienceRule = input.audienceRule;
+        _setDynamicPrerequisites(record, input.prerequisiteTypeIds);
+        record.category = input.category;
+        record.isPublic = input.isPublic;
+        record.publicationFee = input.publicationFee;
+        record.payoutAddress = input.payoutAddress;
+
+        _resetAuthorizedSheikhs(typeId, record);
+        _primeAuthorizedSheikhs(typeId, record, input.authorizedSheikhs);
+        require(record.authorizedSheikhs.length > 0, unicode"👳 IslamicPassport: ao menos um sheik autorizado");
+
+        emit DynamicCertificateTypeUpdated(
+            typeId,
+            record.slug,
+            msg.sender,
+            record.name,
+            unicode"🛠️ Certificado dinamico atualizado"
+        );
+    }
+
+    function issueDynamicCertificate(
+        uint256 typeId,
+        address subject,
+        bytes32 claimHash,
+        string calldata optionalUri
+    ) external returns (uint256) {
+        DynamicCertificateType storage record = _dynamicCertificateTypes[typeId];
+        require(record.exists, unicode"❓ IslamicPassport: tipo dinamico inexistente");
+        require(_profiles[subject].exists, unicode"🪪 IslamicPassport: perfil nao encontrado");
+        require(
+            _dynamicAuthorizedSheikhs[typeId][msg.sender],
+            unicode"🚫 IslamicPassport: sheik nao autorizado para este certificado"
+        );
+        require(
+            _activeDynamicCertificates[subject][typeId] == 0,
+            unicode"♻️ IslamicPassport: sujeito ja possui esta credencial"
+        );
+
+        _validateDynamicAudience(record, subject);
+        _validateDynamicPrerequisites(record, subject);
+
+        uint256 credId = _issueCredential(
+            CredentialType.DYNAMIC_CERTIFICATE,
+            msg.sender,
+            subject,
+            claimHash,
+            optionalUri
+        );
+
+        _credentialDynamicType[credId] = typeId;
+        _activeDynamicCertificates[subject][typeId] = credId;
+
+        DynamicCredentialStatus storage status = _dynamicCredentialStatus[credId];
+        status.typeId = typeId;
+        status.published = record.publicationFee == 0;
+        status.publicationFee = record.publicationFee;
+        status.payoutAddress = record.payoutAddress != address(0) ? record.payoutAddress : msg.sender;
+        status.paidAmount = 0;
+
+        emit DynamicCertificateIssued(
+            credId,
+            typeId,
+            subject,
+            msg.sender,
+            unicode"🌙 Certificado dinamico emitido"
+        );
+
+        return credId;
+    }
+
+    function payDynamicCredentialPublication(uint256 credentialId) external payable {
+        Credential storage cred = _credentials[credentialId];
+        require(cred.id != 0, unicode"❌ IslamicPassport: credencial inexistente");
+        require(cred.subject == msg.sender, unicode"🙅 IslamicPassport: apenas o titular pode pagar");
+        require(cred.credType == CredentialType.DYNAMIC_CERTIFICATE, unicode"🎫 IslamicPassport: tipo invalido");
+
+        DynamicCredentialStatus storage status = _dynamicCredentialStatus[credentialId];
+        require(status.typeId != 0, unicode"⚙️ IslamicPassport: status dinamico inexistente");
+        require(!status.published, unicode"📢 IslamicPassport: certificado ja publicado");
+        require(status.publicationFee > 0, unicode"💸 IslamicPassport: nenhuma taxa configurada");
+        require(msg.value == status.publicationFee, unicode"💰 IslamicPassport: valor incorreto");
+
+        status.paidAmount = msg.value;
+        status.published = true;
+
+        address payout = status.payoutAddress != address(0) ? status.payoutAddress : cred.issuer;
+        (bool ok, ) = payout.call{value: msg.value}("");
+        require(ok, unicode"🔥 IslamicPassport: falha ao transferir taxa");
+
+        emit DynamicCredentialPublicationPaid(
+            credentialId,
+            msg.sender,
+            msg.value,
+            payout,
+            unicode"💎 Taxa de publicacao quitada"
+        );
+    }
+
     function _migrateFromLegacy(address legacyAddress) internal {
         ILegacyIslamicPassport legacy = ILegacyIslamicPassport(legacyAddress);
         deployChainId = legacy.deployChainId();
@@ -486,6 +798,13 @@ contract IslamicPassportV2 is AccessControl {
         bytes32 claimHash,
         string memory uri
     ) internal returns (uint256) {
+        if (credType == CredentialType.INITIAL) {
+            require(
+                issuer == address(this),
+                unicode"🤖 IslamicPassport: certificado INITIAL apenas via registro automático"
+            );
+        }
+
         if (credType == CredentialType.SHEIK_CERTIFICATE) {
             _validateSheikhCertificateIssuer(issuer);
         }
@@ -544,6 +863,13 @@ contract IslamicPassportV2 is AccessControl {
                 }
             }
         }
+
+        if (cred.credType == CredentialType.DYNAMIC_CERTIFICATE) {
+            uint256 typeId = _credentialDynamicType[cred.id];
+            if (typeId != 0 && _activeDynamicCertificates[cred.subject][typeId] == cred.id) {
+                _activeDynamicCertificates[cred.subject][typeId] = 0;
+            }
+        }
     }
 
     function _addSheikh(address user) internal {
@@ -572,6 +898,121 @@ contract IslamicPassportV2 is AccessControl {
 
     function _canActAsAttestedSheikh(address user) internal view returns (bool) {
         return hasRole(SHEIK_ROLE, user) && _activeSheikhCertificates[user] > 0;
+    }
+
+    function _isValidDynamicType(uint256 typeId) internal view returns (bool) {
+        return _dynamicCertificateTypes[typeId].exists;
+    }
+
+    function _setDynamicPrerequisites(
+        DynamicCertificateType storage record,
+        uint256[] calldata prerequisiteTypeIds
+    ) internal {
+        delete record.prerequisiteTypeIds;
+        for (uint256 i = 0; i < prerequisiteTypeIds.length; i++) {
+            uint256 prereqId = prerequisiteTypeIds[i];
+            require(_isValidDynamicType(prereqId), unicode"🧩 IslamicPassport: prerequisito inexistente");
+            require(prereqId != record.id, unicode"🔄 IslamicPassport: prerequisito nao pode ser o proprio tipo");
+            record.prerequisiteTypeIds.push(prereqId);
+        }
+    }
+
+    function _resetAuthorizedSheikhs(uint256 typeId, DynamicCertificateType storage record) internal {
+        address[] storage current = record.authorizedSheikhs;
+        for (uint256 i = 0; i < current.length; i++) {
+            _dynamicAuthorizedSheikhs[typeId][current[i]] = false;
+        }
+        delete record.authorizedSheikhs;
+    }
+
+    function _primeAuthorizedSheikhs(
+        uint256 typeId,
+        DynamicCertificateType storage record,
+        address[] calldata provided
+    ) internal {
+        if (_canActAsAttestedSheikh(msg.sender)) {
+            _addAuthorizedSheikh(typeId, record, msg.sender);
+        }
+
+        for (uint256 i = 0; i < provided.length; i++) {
+            _addAuthorizedSheikh(typeId, record, provided[i]);
+        }
+    }
+
+    function _addAuthorizedSheikh(
+        uint256 typeId,
+        DynamicCertificateType storage record,
+        address sheikh
+    ) internal {
+        if (sheikh == address(0) || _dynamicAuthorizedSheikhs[typeId][sheikh]) {
+            return;
+        }
+        require(_canActAsAttestedSheikh(sheikh), unicode"👳 IslamicPassport: endereco nao e sheik ativo");
+        _dynamicAuthorizedSheikhs[typeId][sheikh] = true;
+        record.authorizedSheikhs.push(sheikh);
+    }
+
+    function _validateDynamicAudience(DynamicCertificateType storage record, address subject) internal view {
+        if (record.audienceRule == DynamicAudienceRule.MUSLIM_ONLY) {
+            require(_hasActiveMuslimAttestation(subject), unicode"🕌 IslamicPassport: requer atestado musulmano");
+        } else if (record.audienceRule == DynamicAudienceRule.SHEIK_ONLY) {
+            require(_activeSheikhCertificates[subject] > 0, unicode"👳 IslamicPassport: requer sheik ativo");
+        }
+    }
+
+    function _validateDynamicPrerequisites(
+        DynamicCertificateType storage record,
+        address subject
+    ) internal view {
+        if (record.prerequisiteTypeIds.length == 0) {
+            return;
+        }
+        for (uint256 i = 0; i < record.prerequisiteTypeIds.length; i++) {
+            uint256 prereqType = record.prerequisiteTypeIds[i];
+            require(
+                _activeDynamicCertificates[subject][prereqType] != 0,
+                unicode"🧾 IslamicPassport: prerequisitos nao atendidos"
+            );
+        }
+    }
+
+    function _normalizeName(string memory value) internal pure returns (string memory) {
+        bytes memory input = bytes(value);
+        bytes memory buffer = new bytes(input.length);
+        uint256 count = 0;
+        bool lastWasSpace = true;
+
+        for (uint256 i = 0; i < input.length; i++) {
+            bytes1 char = input[i];
+            if (char == 0x20 || char == 0x09) {
+                if (!lastWasSpace && count > 0) {
+                    buffer[count++] = 0x20;
+                    lastWasSpace = true;
+                }
+                continue;
+            }
+
+            if (char >= 0x41 && char <= 0x5A) {
+                buffer[count++] = bytes1(uint8(char) + 32);
+            } else {
+                buffer[count++] = char;
+            }
+            lastWasSpace = false;
+        }
+
+        if (count > 0 && buffer[count - 1] == 0x20) {
+            count -= 1;
+        }
+
+        bytes memory trimmed = new bytes(count);
+        for (uint256 j = 0; j < count; j++) {
+            trimmed[j] = buffer[j];
+        }
+        return string(trimmed);
+    }
+
+    function _generateCertificateSlug(string memory name) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(_normalizeName(name)));
     }
 
     function _uint2str(uint256 value) internal pure returns (string memory) {

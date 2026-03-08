@@ -285,6 +285,12 @@ main {
   display: block;
 }
 
+.tab-description {
+  font-size: 0.86rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
 /* ───── Cards ───── */
 
 .card {
@@ -307,6 +313,24 @@ main {
   font-size: 1rem;
   margin-bottom: 0.6rem;
   color: var(--primary);
+}
+
+.card-header-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.hint {
+  margin-top: 0.5rem;
+  font-size: 0.82rem;
 }
 
 /* ───── Forms ───── */
@@ -345,6 +369,19 @@ main {
   resize: vertical;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 0.8rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.input-inline {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 /* ───── Buttons ───── */
@@ -394,6 +431,112 @@ main {
 .btn-sm {
   padding: 0.35rem 0.9rem;
   font-size: 0.8rem;
+}
+
+/* ───── Dynamic certificates UI ───── */
+
+.subframe {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem;
+  background: #fafafa;
+  margin-bottom: 1rem;
+}
+
+.subframe-title {
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+  font-size: 0.86rem;
+}
+
+.subframe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.dual-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.dual-list-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dual-list-column select {
+  width: 100%;
+  min-height: 180px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  padding: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.dual-list-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  justify-content: center;
+  align-items: center;
+}
+
+.dynamic-type-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dynamic-type-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.8rem;
+  background: #fffdf7;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.dynamic-type-card h4 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  color: var(--primary-dark);
+}
+
+.dynamic-type-meta {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.dynamic-type-meta span {
+  background: #eef5ec;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.dynamic-status-info {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+  background: #fff3cd;
+  color: #6b4a00;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .dual-list {
+    grid-template-columns: 1fr;
+  }
+  .dual-list-controls {
+    flex-direction: row;
+  }
 }
 
 /* ───── Alerts / Status ───── */
